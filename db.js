@@ -52,6 +52,15 @@ function clearPlayers() {
   db.players = {};
   save();
 }
+function setDefaultTz(tz) {
+  db.state.defaultTz = tz;
+  save();
+}
+
+function getDefaultTz() {
+  return db.state.defaultTz || 'UTC';
+}
+
 
 // === State (misc tournament data) ===
 function setState(key, value) {
@@ -61,6 +70,17 @@ function setState(key, value) {
 
 function getState(key) {
   return db.state[key];
+}
+
+// Explicit helpers for tournament status
+function setTournamentStatus(status) {
+  // status = "none" | "scheduled" | "in-progress"
+  db.state.tournamentStatus = status;
+  save();
+}
+
+function getTournamentStatus() {
+  return db.state.tournamentStatus || "none";
 }
 
 // === Nicknames ===
@@ -81,6 +101,10 @@ module.exports = {
   clearPlayers,
   setState,
   getState,
+  setTournamentStatus,
+  getTournamentStatus,
   setNickname,
-  getNickname
+  getNickname,
+  setDefaultTz,
+  getDefaultTz
 };

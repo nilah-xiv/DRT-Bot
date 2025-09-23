@@ -1,17 +1,33 @@
 {
   "players": {},
   "state": {
-    "signupMessageId": "1417624378379599925",
+    "signupMessageId": "1420085078356263065",
     "signupChannelId": "1386913963094048974",
-    "tournamentName": "Death Roll Tournament 9-20",
-    "tournamentDate": "2025-09-20",
+    "tournamentName": "9-27 75M DRT",
+    "tournamentDate": "2025-09-27",
     "hour": "10",
     "minute": "30",
     "ampm": "PM",
-    "tournamentTime": "09-20-25 10:30 PM CDT (<t:1758425400:f>)",
-    "tz": "America/Chicago"
+    "tournamentTime": "09-27-25 10:30 PM CDT (<t:1759030200:f>)",
+    "tz": "America/Chicago",
+    "bracket": {
+      "name": "Death Roll Tournament",
+      "time": "09-20-25 10:30 PM CDT (<t:1758425400:f>)",
+      "players": [
+        "NHYLA",
+        "NHYLA",
+        "Test 1",
+        "Test 2"
+      ],
+      "createdAt": "2025-09-23T13:54:46.423Z"
+    },
+    "challongeId": 16860626,
+    "challongeUrl": "https://challonge.com/lu7nqa7r",
+    "lastListMsg_149333533641539585": "1420050653320839308",
+    "tournamentStatus": "scheduled",
+    "defaultTz": "America/Chicago"
   },
   "nicknames": {
-    "149333533641539585": "NILLLUH"
+    "149333533641539585": "1234"
   }
 }
