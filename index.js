@@ -5,8 +5,43 @@ const {
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
   StringSelectMenuBuilder, StringSelectMenuOptionBuilder,
-  Events, MessageFlags
+  Events, MessageFlags,
+  REST, Routes,
+  SlashCommandBuilder
 } = require('discord.js');
+// --- Register /drtadmin Slash Command ---
+async function registerSlashCommands() {
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('drtadmin')
+      .setDescription('Show DRT admin controls (admin only)')
+      .toJSON()
+  ];
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+  const guildId = process.env.GUILD_ID;
+  const appId = (await client.application?.fetch())?.id;
+  if (!guildId) {
+    console.error('GUILD_ID is not set in your .env file. Please set it to your server ID.');
+    return;
+  }
+  try {
+    // Remove global /drtadmin if it exists
+    const globalCommands = await rest.get(Routes.applicationCommands(appId));
+    const drtGlobal = globalCommands.find(cmd => cmd.name === 'drtadmin');
+    if (drtGlobal) {
+      await rest.delete(Routes.applicationCommand(appId, drtGlobal.id));
+      console.log('Removed global /drtadmin command');
+    }
+    // Register only as a guild command
+    await rest.put(
+      Routes.applicationGuildCommands(appId, guildId),
+      { body: commands }
+    );
+    console.log('Registered /drtadmin as a guild command');
+  } catch (err) {
+    console.error('Failed to register/cleanup slash command:', err);
+  }
+}
 const { DateTime } = require('luxon');
 const fetch = require('node-fetch');
 const {
@@ -34,7 +69,7 @@ function buildTzOptions(zones) {
     const dt = DateTime.now().setZone(z);
     const offset = dt.toFormat('ZZZZ');
     const timeNow = dt.toFormat('HH:mm');
-    return { label: `${z} (${offset}) – ${timeNow}`, value: z };
+    return { label: `${z} (${offset}) � ${timeNow}`, value: z };
   });
 }
 
@@ -57,31 +92,31 @@ const euZones = [
 
 // --- Build Signup Buttons ---
 function buildSignupRows(status) {
-  const row1 = new ActionRowBuilder();
-  if (status === 'scheduled') {
-    row1.addComponents(
-      new ButtonBuilder().setCustomId('signup').setLabel('Sign Me Up').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('setnick').setLabel('Set Nickname').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('signupfriends').setLabel('Sign Up Friends').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('withdraw').setLabel('Withdraw').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('list').setLabel('List Players').setStyle(ButtonStyle.Secondary),
+  if (status === 'none') {
+    // Only show the Interact button
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('interact').setLabel('Interact').setStyle(ButtonStyle.Primary)
     );
-  } else if (status === 'in-progress') {
-    row1.addComponents(
-      new ButtonBuilder().setCustomId('setnick').setLabel('Set Nickname').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('list').setLabel('List Players').setStyle(ButtonStyle.Secondary),
-    );
+    return [row];
   } else {
-    row1.addComponents(
-      new ButtonBuilder().setCustomId('setnick').setLabel('Set Nickname').setStyle(ButtonStyle.Secondary),
-    );
+    // Show all regular buttons except admin
+    const row = new ActionRowBuilder();
+    if (status === 'scheduled') {
+      row.addComponents(
+        new ButtonBuilder().setCustomId('signup').setLabel('Sign Me Up').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('setnick').setLabel('Set Nickname').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('signupfriends').setLabel('Sign Up Friends').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('withdraw').setLabel('Withdraw').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('list').setLabel('List Players').setStyle(ButtonStyle.Secondary)
+      );
+    } else if (status === 'in-progress') {
+      row.addComponents(
+        new ButtonBuilder().setCustomId('setnick').setLabel('Set Nickname').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('list').setLabel('List Players').setStyle(ButtonStyle.Secondary)
+      );
+    }
+    return [row];
   }
-
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('adminpanel').setLabel('Admin Panel').setStyle(ButtonStyle.Primary)
-  );
-
-  return [row1, row2];
 }
 
 // --- Challonge Integration ---
@@ -125,11 +160,11 @@ async function postSignupMessage(channel) {
 
   let content;
   if (status === 'none') {
-    content = '⚠️ Death Roll signups are not open. An admin must create a tournament to begin.';
+    content = ':crossed_swords: Death Roll signups are not open. An admin must create a tournament to begin.';
   } else if (status === 'scheduled') {
-    content = `**${tname}**\nScheduled: ${ttime}\nCurrent signups: **${players.length}**`;
+    content = `:crossed_swords: **${tname}**\nScheduled: ${ttime}\nCurrent signups: **${players.length}**`;
   } else {
-    content = `**${tname}**\n🔥 Tournament in progress...`;
+    content = `:crossed_swords: **${tname}**\n?? Tournament in progress...`;
   }
 
   const rows = buildSignupRows(status);
@@ -155,11 +190,11 @@ async function updateSignupMessage(client) {
 
   let content;
   if (status === 'none') {
-    content = '⚠️ Death Roll signups are not open. An admin must create a tournament to begin.';
+    content = ':crossed_swords: Death Roll signups are not open. An admin must create a tournament to begin.';
   } else if (status === 'scheduled') {
-    content = `**${tname}**\nScheduled: ${ttime}\nCurrent signups: **${players.length}**`;
+    content = `:crossed_swords: **${tname}**\nScheduled: ${ttime}\nCurrent signups: **${players.length}**`;
   } else {
-    content = `**${tname}**\n🔥 Tournament in progress...`;
+    content = `:crossed_swords: **${tname}**\n?? Tournament in progress...`;
   }
 
   const rows = buildSignupRows(status);
@@ -167,17 +202,83 @@ async function updateSignupMessage(client) {
 }
 
 // --- Helper Function for Timed Replies ---
+// Note: True ephemeral messages can't be deleted programmatically.
+// This helper standardizes private replies without timers to avoid API warnings.
 async function timedReply(interaction, options, duration = 10000) {
-  const msg = await interaction.reply({ ...options, flags: MessageFlags.Ephemeral, withResponse: true });
-  setTimeout(() => {
-    if (msg.deletable) msg.delete().catch(() => {});
-  }, duration);
+  return interaction.reply({ ...options, flags: MessageFlags.Ephemeral });
+}
+
+// --- End Existing Bracket ---
+async function endExistingBracket(interaction) {
+  const existingId = getState('challongeId');
+  if (!existingId) {
+    return timedReply(interaction, { content: '?? No existing bracket to end.' }, 30000);
+  }
+
+  try {
+    // 1) Look up current tournament state
+    const infoRes = await fetch(`https://api.challonge.com/v1/tournaments/${existingId}.json?api_key=${process.env.CHALLONGE_API_KEY}`);
+    if (!infoRes.ok) throw new Error(await infoRes.text());
+    const infoData = await infoRes.json();
+    const tourn = infoData?.tournament || infoData; // defensive: some libs wrap under { tournament }
+    const state = tourn?.state;
+
+    // 2) If already complete, just clear local state
+    if (state === 'complete') {
+      setState('challongeId', null);
+      setState('challongeUrl', null);
+      setTournamentStatus('none');
+      await updateSignupMessage(client);
+      return timedReply(interaction, { content: '? Bracket is already complete. Cleared saved bracket and reset status.' }, 30000);
+    }
+
+    // 3) Try to finalize if not yet complete
+    const finRes = await fetch(`https://api.challonge.com/v1/tournaments/${existingId}/finalize.json?api_key=${process.env.CHALLONGE_API_KEY}`, {
+      method: 'POST'
+    });
+
+    if (!finRes.ok) {
+      const errText = await finRes.text();
+      // Fallback: clear local state even if Challonge refuses finalize (e.g., missing scores)
+      setState('challongeId', null);
+      setState('challongeUrl', null);
+      setTournamentStatus('none');
+      await updateSignupMessage(client);
+      return timedReply(
+        interaction,
+        { content: `?? Could not finalize on Challonge (${errText.trim()}). Cleared saved bracket locally so you can create a new one.` },
+        30000
+      );
+    }
+
+    // 4) Finalized successfully
+    setState('challongeId', null);
+    setState('challongeUrl', null);
+    setTournamentStatus('none');
+    await updateSignupMessage(client);
+    return timedReply(interaction, { content: '? Bracket finalized on Challonge and cleared locally.' }, 30000);
+  } catch (err) {
+    console.error('Error finalizing bracket:', err);
+    // Fallback: clear locally so workflow can continue
+    setState('challongeId', null);
+    setState('challongeUrl', null);
+    setTournamentStatus('none');
+    try { await updateSignupMessage(client); } catch {}
+    return timedReply(
+      interaction,
+      { content: `?? Could not reach Challonge to finalize (details in logs). Cleared saved bracket locally so you can proceed.` },
+      30000
+    );
+  }
 }
 
 // --- Bot Startup ---
 client.once(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
   const channel = await client.channels.fetch(CHANNEL_ID);
+
+  // Register slash commands
+  await registerSlashCommands();
 
   try {
     const messageId = getState('signupMessageId');
@@ -198,7 +299,63 @@ client.once(Events.ClientReady, async () => {
 // --- Interactions ---
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    // --- Handle /drtadmin slash command ---
+    if (interaction.isChatInputCommand && interaction.commandName === 'drtadmin') {
+      const isAdmin = interaction.member?.roles?.cache?.has(OWNER_ROLE) || interaction.member?.roles?.cache?.has(STAFF_ROLE);
+      if (!isAdmin) {
+        return interaction.reply({ content: '?? Not allowed.', ephemeral: true });
+      }
+      const row1 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('start').setLabel('Start Bracket').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('newtournament').setLabel('New Tournament').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('createbracket').setLabel('Create Bracket').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('settz').setLabel('Set Default Time Zone').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('endbracket').setLabel('End Bracket').setStyle(ButtonStyle.Danger)
+      );
+      const components = [row1];
+      const challongeUrl = getState('challongeUrl');
+      if (challongeUrl) {
+        const row2 = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setLabel('View Bracket').setStyle(ButtonStyle.Link).setURL(challongeUrl)
+        );
+        components.push(row2);
+      }
+      return interaction.reply({
+        content: ':crossed_swords: **Admin Controls**',
+        components,
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
     if (interaction.isButton()) {
+      // Interact button handler
+      if (interaction.customId === 'interact') {
+        const status = getTournamentStatus();
+        const isAdmin = interaction.member?.roles?.cache?.has(OWNER_ROLE) || interaction.member?.roles?.cache?.has(STAFF_ROLE);
+        const rows = [];
+        const row = new ActionRowBuilder();
+        // Always show Set Nickname
+        row.addComponents(new ButtonBuilder().setCustomId('setnick').setLabel('Set Nickname').setStyle(ButtonStyle.Secondary));
+        // Show other options based on tournament state
+        if (status === 'scheduled') {
+          row.addComponents(
+            new ButtonBuilder().setCustomId('signup').setLabel('Sign Me Up').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('signupfriends').setLabel('Sign Up Friends').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('withdraw').setLabel('Withdraw').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId('list').setLabel('List Players').setStyle(ButtonStyle.Secondary)
+          );
+        } else if (status === 'in-progress') {
+          row.addComponents(
+            new ButtonBuilder().setCustomId('list').setLabel('List Players').setStyle(ButtonStyle.Secondary)
+          );
+        }
+        rows.push(row);
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        return interaction.editReply({
+          content: 'Available actions:',
+          components: rows
+        });
+      }
       // Sign up
       if (interaction.customId === 'signup') {
         if (getTournamentStatus() !== 'scheduled') {
@@ -209,11 +366,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const existing = listPlayers();
         if (existing.includes(displayName)) {
-          return timedReply(interaction, { content: `⚠️ You’re already signed up as **${displayName}**.` }, 30000);
+          return timedReply(interaction, { content: `?? You�re already signed up as **${displayName}**.` }, 30000);
         }
 
         addPlayers(interaction.user.id, [displayName]);
-        await timedReply(interaction, { content: `✅ Signed up: ${displayName}` }, 10000);
+        await timedReply(interaction, { content: `? Signed up: ${displayName}` }, 10000);
         return updateSignupMessage(client);
       }
 
@@ -253,7 +410,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId === 'withdraw') {
         const mine = listUserPlayers(interaction.user.id);
         if (!mine || mine.length === 0) {
-          return timedReply(interaction, { content: 'ℹ️ You have no signups to withdraw.' }, 30000);
+          return timedReply(interaction, { content: '?? You have no signups to withdraw.' }, 30000);
         }
 
         const options = mine.slice(0, 25).map((n, i) =>
@@ -277,13 +434,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         try {
           await interaction.reply({
-            content: '📝 Select players to withdraw, or click **Withdraw All**:',
+            content: '?? Select players to withdraw, or click **Withdraw All**:',
             components: [row1, row2],
             flags: MessageFlags.Ephemeral
           });
         } catch (err) {
           console.error('Withdraw reply error:', err);
-          return timedReply(interaction, { content: '❌ Failed to open withdraw menu.' }, 30000);
+          return timedReply(interaction, { content: '? Failed to open withdraw menu.' }, 30000);
         }
       }
 
@@ -291,44 +448,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId === 'withdrawAll') {
         const mine = listUserPlayers(interaction.user.id);
         if (mine.length === 0) {
-          return interaction.update({ content: 'ℹ️ Nothing to withdraw.', components: [] });
+          return interaction.update({ content: '?? Nothing to withdraw.', components: [] });
         }
         removePlayers(interaction.user.id, mine);
-        await interaction.update({ content: '🔴 All your signups have been withdrawn.', components: [] });
+        await interaction.update({ content: '?? All your signups have been withdrawn.', components: [] });
         return updateSignupMessage(client);
       }
 
       // List Players
       if (interaction.customId === 'list') {
         const players = listPlayers();
-        if (players.length === 0) return timedReply(interaction, { content: '📭 No signups yet.' }, 30000);
+        if (players.length === 0) return timedReply(interaction, { content: '?? No signups yet.' }, 30000);
         const formatted = players.map((p, i) => `${i + 1}. ${p}`).join('\n');
         return timedReply(interaction, { content: `**Signups (${players.length})**\n${formatted}` }, 30000);
       }
 
-      // Admin Panel
-      if (interaction.customId === 'adminpanel') {
-        const hasRole = interaction.member.roles.cache.has(OWNER_ROLE) || interaction.member.roles.cache.has(STAFF_ROLE);
-        if (!hasRole) return timedReply(interaction, { content: '🚫 Not allowed.' }, 30000);
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('start').setLabel('Start Bracket').setStyle(ButtonStyle.Danger),
-          new ButtonBuilder().setCustomId('newtournament').setLabel('New Tournament').setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId('createbracket').setLabel('Create Bracket').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId('settz').setLabel('Set Default Time Zone').setStyle(ButtonStyle.Secondary)
-        );
-
-        const challongeUrl = getState('challongeUrl');
-        if (challongeUrl) {
-          row.addComponents(new ButtonBuilder().setLabel('View Bracket').setStyle(ButtonStyle.Link).setURL(challongeUrl));
-        }
-
-        await interaction.reply({
-          content: '⚙️ **Admin Controls**',
-          components: [row],
-          flags: MessageFlags.Ephemeral
-        });
-      }
 
       // Set Default Time Zone
       if (interaction.customId === 'settz') {
@@ -342,9 +476,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .addOptions(buildTzOptions(euZones));
 
         return interaction.reply({
-          content: '🌐 Please select a default time zone for tournaments:',
+          content: '?? Please select a default time zone for tournaments:',
           components: [new ActionRowBuilder().addComponents(naMenu), new ActionRowBuilder().addComponents(euMenu)],
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
       }
 
@@ -370,21 +504,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
       // Create Bracket
       if (interaction.customId === 'createbracket') {
         const isOwner = interaction.member.roles.cache.has(OWNER_ROLE);
-        if (!isOwner) return timedReply(interaction, { content: '🚫 Only Owners can create brackets.' }, 30000);
+        if (!isOwner) return timedReply(interaction, { content: '?? Only Owners can create brackets.' }, 30000);
 
         if (getTournamentStatus() !== 'scheduled') {
-          return timedReply(interaction, { content: '⚠️ No scheduled tournament to create a bracket for.' }, 30000);
+          return timedReply(interaction, { content: '?? No scheduled tournament to create a bracket for.' }, 30000);
         }
 
         const existingId = getState('challongeId');
         if (existingId) {
           const url = getState('challongeUrl');
-          return timedReply(interaction, { content: `ℹ️ A Challonge tournament already exists.\n${url ?? '(no url saved)'}` }, 30000);
+          return timedReply(interaction, { content: `?? A Challonge tournament already exists.\n${url ?? '(no url saved)'}` }, 30000);
         }
 
         const players = listPlayers();
         if (players.length < 2) {
-          return timedReply(interaction, { content: '⚠️ Not enough players to create a bracket.' }, 30000);
+          return timedReply(interaction, { content: '?? Not enough players to create a bracket.' }, 30000);
         }
 
         const tname = getState('tournamentName') || 'Death Roll Tournament';
@@ -398,36 +532,41 @@ client.on(Events.InteractionCreate, async (interaction) => {
           setState('challongeUrl', tourn.full_challonge_url);
 
           await interaction.reply({
-            content: `✅ Bracket created on Challonge for **${tname}** with ${players.length} players.\n${tourn.full_challonge_url}`,
+            content: `? Bracket created on Challonge for **${tname}** with ${players.length} players.\n${tourn.full_challonge_url}`,
             flags: MessageFlags.Ephemeral
           });
 
           const channel = await client.channels.fetch(getState('signupChannelId'));
-          await channel.send(`📣 Bracket for **${tname}** is live!\n${tourn.full_challonge_url}`);
+          await channel.send(`?? Bracket for **${tname}** is live!\n${tourn.full_challonge_url}`);
         } catch (err) {
           console.error(err);
-          return timedReply(interaction, { content: `❌ Failed to create Challonge tournament: ${err.message}` }, 30000);
+          return timedReply(interaction, { content: `? Failed to create Challonge tournament: ${err.message}` }, 30000);
         }
       }
 
       // Start Bracket
       if (interaction.customId === 'start') {
         const isOwner = interaction.member.roles.cache.has(OWNER_ROLE);
-        if (!isOwner) return interaction.reply({ content: '🚫 Only Owners can start the bracket.', ephemeral: true });
+  if (!isOwner) return interaction.reply({ content: '?? Only Owners can start the bracket.', flags: MessageFlags.Ephemeral });
 
         const tid = getState('challongeId');
-        if (!tid) return interaction.reply({ content: '⚠️ No Challonge tournament created yet.', ephemeral: true });
+  if (!tid) return interaction.reply({ content: '?? No Challonge tournament created yet.', flags: MessageFlags.Ephemeral });
 
         try {
           await startChallongeTournament(tid);
           clearPlayers();
           setTournamentStatus('in-progress');
           await updateSignupMessage(client);
-          return interaction.reply({ content: '🚀 Tournament started on Challonge!', ephemeral: true });
+          return interaction.reply({ content: '?? Tournament started on Challonge!', flags: MessageFlags.Ephemeral });
         } catch (err) {
           console.error(err);
-          return interaction.reply({ content: `❌ Failed to start: ${err.message}`, ephemeral: true });
+          return interaction.reply({ content: `? Failed to start: ${err.message}`, flags: MessageFlags.Ephemeral });
         }
+      }
+
+      // End Bracket
+      if (interaction.customId === 'endbracket') {
+        return endExistingBracket(interaction);
       }
     }
 
@@ -436,14 +575,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId === 'withdrawSelect') {
         const selected = interaction.values.map(v => v.split('-')[0]); // strip index
         removePlayers(interaction.user.id, selected);
-        await timedReply(interaction, { content: `🔴 Removed: ${selected.join(', ')}` }, 10000);
+        await timedReply(interaction, { content: `?? Removed: ${selected.join(', ')}` }, 10000);
         return updateSignupMessage(client);
       }
 
       if (interaction.customId === 'tzSelectNA' || interaction.customId === 'tzSelectEU') {
         const tz = interaction.values[0];
         setDefaultTz(tz);
-        return interaction.update({ content: `✅ Default tournament time zone set to **${tz}**`, components: [] });
+        return interaction.update({ content: `? Default tournament time zone set to **${tz}**`, components: [] });
       }
     }
 
@@ -452,7 +591,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId === 'setnickModal') {
         const nickname = interaction.fields.getTextInputValue('nickname').trim();
         setNickname(interaction.user.id, nickname);
-        return timedReply(interaction, { content: `✅ Nickname set to: ${nickname}` }, 10000);
+        return timedReply(interaction, { content: `? Nickname set to: ${nickname}` }, 10000);
       }
 
       if (interaction.customId === 'signupFriendsModal') {
@@ -473,11 +612,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const newNames = names.filter(n => !global.has(n.toLowerCase()));
 
         if (newNames.length === 0) {
-          return timedReply(interaction, { content: '⚠️ All of those names are already signed up (or were duplicates).' }, 30000);
+          return timedReply(interaction, { content: '?? All of those names are already signed up (or were duplicates).' }, 30000);
         }
 
         addPlayers(interaction.user.id, newNames);
-        await timedReply(interaction, { content: `✅ Friends signed up: ${newNames.join(', ')}` }, 10000);
+        await timedReply(interaction, { content: `? Friends signed up: ${newNames.join(', ')}` }, 10000);
         return updateSignupMessage(client);
       }
 
@@ -506,8 +645,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         await updateSignupMessage(client);
         return interaction.reply({
-          content: `✅ Tournament **${tname}** scheduled for ${dt.toFormat('MM-dd-yy hh:mm a ZZZZ')} (<t:${unix}:f>)`,
-          ephemeral: true
+          content: `? Tournament **${tname}** scheduled for ${dt.toFormat('MM-dd-yy hh:mm a ZZZZ')} (<t:${unix}:f>)`,
+          flags: MessageFlags.Ephemeral
         });
       }
     }
@@ -515,7 +654,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     console.error('Interaction error:', err);
     if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
       try {
-        await interaction.reply({ content: '❌ Something went wrong handling that interaction.', ephemeral: true });
+  await interaction.reply({ content: '? Something went wrong handling that interaction.', flags: MessageFlags.Ephemeral });
       } catch {}
     }
   }
