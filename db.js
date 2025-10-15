@@ -85,7 +85,19 @@ function getTournamentStatus() {
 
 // === Nicknames ===
 function setNickname(userId, nickname) {
+  const oldNickname = db.nicknames[userId];
   db.nicknames[userId] = nickname;
+  
+  // If user has existing players and they changed their nickname, update the player list
+  if (oldNickname && db.players[userId]) {
+    const userPlayers = db.players[userId];
+    // Find if the old nickname is in their player list and replace it
+    const oldNicknameIndex = userPlayers.indexOf(oldNickname);
+    if (oldNicknameIndex !== -1) {
+      userPlayers[oldNicknameIndex] = nickname;
+    }
+  }
+  
   save();
 }
 

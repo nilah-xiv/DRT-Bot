@@ -69,7 +69,7 @@ function buildTzOptions(zones) {
     const dt = DateTime.now().setZone(z);
     const offset = dt.toFormat('ZZZZ');
     const timeNow = dt.toFormat('HH:mm');
-    return { label: `${z} (${offset}) � ${timeNow}`, value: z };
+    return { label: `${z} (${offset}) � ${timeNow}`, value: z };
   });
 }
 
@@ -110,10 +110,12 @@ function buildSignupRows(status) {
         new ButtonBuilder().setCustomId('list').setLabel('List Players').setStyle(ButtonStyle.Secondary)
       );
     } else if (status === 'in-progress') {
-      row.addComponents(
-        new ButtonBuilder().setCustomId('setnick').setLabel('Set Nickname').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('list').setLabel('List Players').setStyle(ButtonStyle.Secondary)
-      );
+      const challongeUrl = getState('challongeUrl');
+      if (challongeUrl) {
+        row.addComponents(
+          new ButtonBuilder().setLabel('View Bracket').setStyle(ButtonStyle.Link).setURL(challongeUrl)
+        );
+      }
     }
     return [row];
   }
@@ -151,6 +153,52 @@ async function startChallongeTournament(tid) {
   return res.json();
 }
 
+// --- Get Current Match from Challonge ---
+async function getCurrentMatch(tournamentId) {
+  try {
+    // Get matches
+    const matchesRes = await fetch(`https://api.challonge.com/v1/tournaments/${tournamentId}/matches.json?api_key=${process.env.CHALLONGE_API_KEY}`);
+    if (!matchesRes.ok) throw new Error(await matchesRes.text());
+    const matchesData = await matchesRes.json();
+
+    // Get participants to map IDs to names
+    const participantsRes = await fetch(`https://api.challonge.com/v1/tournaments/${tournamentId}/participants.json?api_key=${process.env.CHALLONGE_API_KEY}`);
+    if (!participantsRes.ok) throw new Error(await participantsRes.text());
+    const participantsData = await participantsRes.json();
+
+    // Create participant mapping
+    const participantMap = {};
+    participantsData.forEach(p => {
+      const participant = p.participant || p;
+      participantMap[participant.id] = participant.name;
+    });
+
+    // Find the current match (first open match without scores)
+    const matches = matchesData.map(m => m.match || m);
+    const currentMatch = matches.find(match => 
+      match.state === 'open' && 
+      (!match.scores_csv || match.scores_csv.trim() === '')
+    );
+
+    if (!currentMatch) {
+      return null; // No current match
+    }
+
+    const player1 = participantMap[currentMatch.player1_id] || 'TBD';
+    const player2 = participantMap[currentMatch.player2_id] || 'TBD';
+
+    return {
+      player1,
+      player2,
+      round: currentMatch.round,
+      matchId: currentMatch.id
+    };
+  } catch (error) {
+    console.error('Error getting current match:', error);
+    return null;
+  }
+}
+
 // --- Signup Message ---
 async function postSignupMessage(channel) {
   const players = listPlayers();
@@ -160,11 +208,27 @@ async function postSignupMessage(channel) {
 
   let content;
   if (status === 'none') {
-    content = ':crossed_swords: Death Roll signups are not open. An admin must create a tournament to begin.';
+    content = '⚔️ Death Roll signups are not open. An admin must create a tournament to begin.';
   } else if (status === 'scheduled') {
-    content = `:crossed_swords: **${tname}**\nScheduled: ${ttime}\nCurrent signups: **${players.length}**`;
+    content = `⚔️ **${tname}**\nScheduled: ${ttime}\nCurrent signups: **${players.length}**`;
   } else {
-    content = `:crossed_swords: **${tname}**\n?? Tournament in progress...`;
+    const challongeUrl = getState('challongeUrl');
+    if (challongeUrl) {
+      // Get current match info for live tournaments
+      const challongeId = getState('challongeId');
+      if (challongeId) {
+        const currentMatch = await getCurrentMatch(challongeId);
+        if (currentMatch) {
+          content = `⚔️ **${tname}**\n🏆 Tournament is live!\n⚡ **Current Match:** ${currentMatch.player1} vs ${currentMatch.player2} (Round ${currentMatch.round})`;
+        } else {
+          content = `⚔️ **${tname}**\n🏆 Tournament is live!\n✅ All matches complete!`;
+        }
+      } else {
+        content = `⚔️ **${tname}**\n🏆 Tournament is live!`;
+      }
+    } else {
+      content = `⚔️ **${tname}**\n🏆 Tournament in progress...`;
+    }
   }
 
   const rows = buildSignupRows(status);
@@ -190,11 +254,27 @@ async function updateSignupMessage(client) {
 
   let content;
   if (status === 'none') {
-    content = ':crossed_swords: Death Roll signups are not open. An admin must create a tournament to begin.';
+    content = '⚔️ Death Roll signups are not open. An admin must create a tournament to begin.';
   } else if (status === 'scheduled') {
-    content = `:crossed_swords: **${tname}**\nScheduled: ${ttime}\nCurrent signups: **${players.length}**`;
+    content = `⚔️ **${tname}**\nScheduled: ${ttime}\nCurrent signups: **${players.length}**`;
   } else {
-    content = `:crossed_swords: **${tname}**\n?? Tournament in progress...`;
+    const challongeUrl = getState('challongeUrl');
+    if (challongeUrl) {
+      // Get current match info for live tournaments
+      const challongeId = getState('challongeId');
+      if (challongeId) {
+        const currentMatch = await getCurrentMatch(challongeId);
+        if (currentMatch) {
+          content = `⚔️ **${tname}**\n🏆 Tournament is live!\n⚡ **Current Match:** ${currentMatch.player1} vs ${currentMatch.player2} (Round ${currentMatch.round})`;
+        } else {
+          content = `⚔️ **${tname}**\n🏆 Tournament is live!\n✅ All matches complete!`;
+        }
+      } else {
+        content = `⚔️ **${tname}**\n🏆 Tournament is live!`;
+      }
+    } else {
+      content = `⚔️ **${tname}**\n🏆 Tournament in progress...`;
+    }
   }
 
   const rows = buildSignupRows(status);
@@ -212,7 +292,7 @@ async function timedReply(interaction, options, duration = 10000) {
 async function endExistingBracket(interaction) {
   const existingId = getState('challongeId');
   if (!existingId) {
-    return timedReply(interaction, { content: '?? No existing bracket to end.' }, 30000);
+    return timedReply(interaction, { content: '❌ No existing bracket to end.' }, 30000);
   }
 
   try {
@@ -229,7 +309,7 @@ async function endExistingBracket(interaction) {
       setState('challongeUrl', null);
       setTournamentStatus('none');
       await updateSignupMessage(client);
-      return timedReply(interaction, { content: '? Bracket is already complete. Cleared saved bracket and reset status.' }, 30000);
+      return timedReply(interaction, { content: '✅ Bracket is already complete. Cleared saved bracket and reset status.' }, 30000);
     }
 
     // 3) Try to finalize if not yet complete
@@ -246,7 +326,7 @@ async function endExistingBracket(interaction) {
       await updateSignupMessage(client);
       return timedReply(
         interaction,
-        { content: `?? Could not finalize on Challonge (${errText.trim()}). Cleared saved bracket locally so you can create a new one.` },
+        { content: `⚠️ Could not finalize on Challonge (${errText.trim()}). Cleared saved bracket locally so you can create a new one.` },
         30000
       );
     }
@@ -256,7 +336,7 @@ async function endExistingBracket(interaction) {
     setState('challongeUrl', null);
     setTournamentStatus('none');
     await updateSignupMessage(client);
-    return timedReply(interaction, { content: '? Bracket finalized on Challonge and cleared locally.' }, 30000);
+    return timedReply(interaction, { content: '✅ Bracket finalized on Challonge and cleared locally.' }, 30000);
   } catch (err) {
     console.error('Error finalizing bracket:', err);
     // Fallback: clear locally so workflow can continue
@@ -266,7 +346,7 @@ async function endExistingBracket(interaction) {
     try { await updateSignupMessage(client); } catch {}
     return timedReply(
       interaction,
-      { content: `?? Could not reach Challonge to finalize (details in logs). Cleared saved bracket locally so you can proceed.` },
+      { content: `⚠️ Could not reach Challonge to finalize (details in logs). Cleared saved bracket locally so you can proceed.` },
       30000
     );
   }
@@ -294,6 +374,18 @@ client.once(Events.ClientReady, async () => {
     console.error('Startup error:', err);
     await postSignupMessage(channel);
   }
+
+  // Start periodic updates for current match info
+  setInterval(async () => {
+    try {
+      const status = getTournamentStatus();
+      if (status === 'in-progress') {
+        await updateSignupMessage(client);
+      }
+    } catch (error) {
+      console.error('Error updating current match:', error);
+    }
+  }, 5000); // Update every 5 seconds
 });
 
 // --- Interactions ---
@@ -301,9 +393,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // --- Handle /drtadmin slash command ---
     if (interaction.isChatInputCommand && interaction.commandName === 'drtadmin') {
-      const isAdmin = interaction.member?.roles?.cache?.has(OWNER_ROLE) || interaction.member?.roles?.cache?.has(STAFF_ROLE);
+      const hasOwnerRole = interaction.member?.roles?.cache?.has(OWNER_ROLE);
+      const hasStaffRole = STAFF_ROLE && interaction.member?.roles?.cache?.has(STAFF_ROLE);
+      const isAdmin = hasOwnerRole || hasStaffRole;
+      
       if (!isAdmin) {
-        return interaction.reply({ content: '?? Not allowed.', ephemeral: true });
+        return interaction.reply({ content: '❌ Not allowed.', ephemeral: true });
       }
       const row1 = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('start').setLabel('Start Bracket').setStyle(ButtonStyle.Danger),
@@ -320,18 +415,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
         );
         components.push(row2);
       }
-      return interaction.reply({
-        content: ':crossed_swords: **Admin Controls**',
-        components,
-        flags: MessageFlags.Ephemeral
-      });
+      try {
+        return await interaction.reply({
+          content: '⚔️ **Admin Controls**',
+          components,
+          flags: MessageFlags.Ephemeral
+        });
+      } catch (replyErr) {
+        console.log('Could not reply to /drtadmin command (likely timeout)');
+      }
     }
 
     if (interaction.isButton()) {
       // Interact button handler
       if (interaction.customId === 'interact') {
         const status = getTournamentStatus();
-        const isAdmin = interaction.member?.roles?.cache?.has(OWNER_ROLE) || interaction.member?.roles?.cache?.has(STAFF_ROLE);
+        const hasOwnerRole = interaction.member?.roles?.cache?.has(OWNER_ROLE);
+        const hasStaffRole = STAFF_ROLE && interaction.member?.roles?.cache?.has(STAFF_ROLE);
+        const isAdmin = hasOwnerRole || hasStaffRole;
         const rows = [];
         const row = new ActionRowBuilder();
         // Always show Set Nickname
@@ -366,11 +467,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const existing = listPlayers();
         if (existing.includes(displayName)) {
-          return timedReply(interaction, { content: `?? You�re already signed up as **${displayName}**.` }, 30000);
+          return timedReply(interaction, { content: `⚠️ You're already signed up as **${displayName}**.` }, 30000);
         }
 
         addPlayers(interaction.user.id, [displayName]);
-        await timedReply(interaction, { content: `? Signed up: ${displayName}` }, 10000);
+        await timedReply(interaction, { content: `✅ Signed up: ${displayName}` }, 10000);
         return updateSignupMessage(client);
       }
 
@@ -381,9 +482,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setTitle('Set Nickname');
         const input = new TextInputBuilder()
           .setCustomId('nickname')
-          .setLabel('Enter your nickname')
+          .setLabel('Enter your nickname (max 233 characters)')
           .setStyle(TextInputStyle.Short)
-          .setRequired(true);
+          .setRequired(true)
+          .setMaxLength(233);
         modal.addComponents(new ActionRowBuilder().addComponents(input));
         await interaction.showModal(modal);
         return;
@@ -410,7 +512,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId === 'withdraw') {
         const mine = listUserPlayers(interaction.user.id);
         if (!mine || mine.length === 0) {
-          return timedReply(interaction, { content: '?? You have no signups to withdraw.' }, 30000);
+          return timedReply(interaction, { content: '❌ You have no signups to withdraw.' }, 30000);
         }
 
         const options = mine.slice(0, 25).map((n, i) =>
@@ -434,13 +536,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         try {
           await interaction.reply({
-            content: '?? Select players to withdraw, or click **Withdraw All**:',
+            content: '🗑️ Select players to withdraw, or click **Withdraw All**:',
             components: [row1, row2],
             flags: MessageFlags.Ephemeral
           });
         } catch (err) {
           console.error('Withdraw reply error:', err);
-          return timedReply(interaction, { content: '? Failed to open withdraw menu.' }, 30000);
+          return timedReply(interaction, { content: '❌ Failed to open withdraw menu.' }, 30000);
         }
       }
 
@@ -448,17 +550,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId === 'withdrawAll') {
         const mine = listUserPlayers(interaction.user.id);
         if (mine.length === 0) {
-          return interaction.update({ content: '?? Nothing to withdraw.', components: [] });
+          return interaction.update({ content: '❌ Nothing to withdraw.', components: [] });
         }
         removePlayers(interaction.user.id, mine);
-        await interaction.update({ content: '?? All your signups have been withdrawn.', components: [] });
+        await interaction.update({ content: '✅ All your signups have been withdrawn.', components: [] });
         return updateSignupMessage(client);
       }
 
       // List Players
       if (interaction.customId === 'list') {
         const players = listPlayers();
-        if (players.length === 0) return timedReply(interaction, { content: '?? No signups yet.' }, 30000);
+        if (players.length === 0) return timedReply(interaction, { content: '📝 No signups yet.' }, 30000);
         const formatted = players.map((p, i) => `${i + 1}. ${p}`).join('\n');
         return timedReply(interaction, { content: `**Signups (${players.length})**\n${formatted}` }, 30000);
       }
@@ -476,7 +578,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .addOptions(buildTzOptions(euZones));
 
         return interaction.reply({
-          content: '?? Please select a default time zone for tournaments:',
+          content: '🌍 Please select a default time zone for tournaments:',
           components: [new ActionRowBuilder().addComponents(naMenu), new ActionRowBuilder().addComponents(euMenu)],
           flags: MessageFlags.Ephemeral
         });
@@ -484,6 +586,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // New Tournament
       if (interaction.customId === 'newtournament') {
+        // Check if there's already an active tournament
+        const currentStatus = getTournamentStatus();
+        if (currentStatus === 'in-progress') {
+          return interaction.reply({
+            content: '❌ Cannot create a new tournament while one is currently in progress. Please end the current tournament first.',
+            flags: MessageFlags.Ephemeral
+          });
+        }
+
         const modal = new ModalBuilder().setCustomId('newTournamentModal').setTitle('New Tournament');
 
         const nameInput = new TextInputBuilder().setCustomId('tname').setLabel('Tournament Name').setStyle(TextInputStyle.Short).setRequired(true);
@@ -498,27 +609,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
           new ActionRowBuilder().addComponents(ampmInput)
         );
 
-        return interaction.showModal(modal);
+        try {
+          return await interaction.showModal(modal);
+        } catch (err) {
+          console.error('Error showing new tournament modal:', err);
+          return interaction.reply({
+            content: '❌ Failed to open tournament creation form. Please try again.',
+            flags: MessageFlags.Ephemeral
+          });
+        }
       }
 
       // Create Bracket
       if (interaction.customId === 'createbracket') {
         const isOwner = interaction.member.roles.cache.has(OWNER_ROLE);
-        if (!isOwner) return timedReply(interaction, { content: '?? Only Owners can create brackets.' }, 30000);
+        if (!isOwner) return timedReply(interaction, { content: '❌ Only Owners can create brackets.' }, 30000);
 
         if (getTournamentStatus() !== 'scheduled') {
-          return timedReply(interaction, { content: '?? No scheduled tournament to create a bracket for.' }, 30000);
+          return timedReply(interaction, { content: '❌ No scheduled tournament to create a bracket for.' }, 30000);
         }
 
         const existingId = getState('challongeId');
         if (existingId) {
           const url = getState('challongeUrl');
-          return timedReply(interaction, { content: `?? A Challonge tournament already exists.\n${url ?? '(no url saved)'}` }, 30000);
+          return timedReply(interaction, { content: `⚠️ A Challonge tournament already exists.\n${url ?? '(no url saved)'}` }, 30000);
         }
 
         const players = listPlayers();
         if (players.length < 2) {
-          return timedReply(interaction, { content: '?? Not enough players to create a bracket.' }, 30000);
+          return timedReply(interaction, { content: '❌ Not enough players to create a bracket.' }, 30000);
         }
 
         const tname = getState('tournamentName') || 'Death Roll Tournament';
@@ -532,35 +651,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
           setState('challongeUrl', tourn.full_challonge_url);
 
           await interaction.reply({
-            content: `? Bracket created on Challonge for **${tname}** with ${players.length} players.\n${tourn.full_challonge_url}`,
+            content: `🏆 Bracket created on Challonge for **${tname}** with ${players.length} players.\n${tourn.full_challonge_url}`,
             flags: MessageFlags.Ephemeral
           });
 
           const channel = await client.channels.fetch(getState('signupChannelId'));
-          await channel.send(`?? Bracket for **${tname}** is live!\n${tourn.full_challonge_url}`);
+          await channel.send(`🏆 Bracket for **${tname}** is live!\n${tourn.full_challonge_url}`);
         } catch (err) {
           console.error(err);
-          return timedReply(interaction, { content: `? Failed to create Challonge tournament: ${err.message}` }, 30000);
+          return timedReply(interaction, { content: `❌ Failed to create Challonge tournament: ${err.message}` }, 30000);
         }
       }
 
       // Start Bracket
       if (interaction.customId === 'start') {
         const isOwner = interaction.member.roles.cache.has(OWNER_ROLE);
-  if (!isOwner) return interaction.reply({ content: '?? Only Owners can start the bracket.', flags: MessageFlags.Ephemeral });
+  if (!isOwner) return interaction.reply({ content: '❌ Only Owners can start the bracket.', flags: MessageFlags.Ephemeral });
 
         const tid = getState('challongeId');
-  if (!tid) return interaction.reply({ content: '?? No Challonge tournament created yet.', flags: MessageFlags.Ephemeral });
+  if (!tid) return interaction.reply({ content: '❌ No Challonge tournament created yet.', flags: MessageFlags.Ephemeral });
 
         try {
           await startChallongeTournament(tid);
           clearPlayers();
           setTournamentStatus('in-progress');
           await updateSignupMessage(client);
-          return interaction.reply({ content: '?? Tournament started on Challonge!', flags: MessageFlags.Ephemeral });
+          return interaction.reply({ content: '🏆 Tournament started on Challonge!', flags: MessageFlags.Ephemeral });
         } catch (err) {
           console.error(err);
-          return interaction.reply({ content: `? Failed to start: ${err.message}`, flags: MessageFlags.Ephemeral });
+          return interaction.reply({ content: `❌ Failed to start: ${err.message}`, flags: MessageFlags.Ephemeral });
         }
       }
 
@@ -575,14 +694,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId === 'withdrawSelect') {
         const selected = interaction.values.map(v => v.split('-')[0]); // strip index
         removePlayers(interaction.user.id, selected);
-        await timedReply(interaction, { content: `?? Removed: ${selected.join(', ')}` }, 10000);
+        await timedReply(interaction, { content: `🗑️ Removed: ${selected.join(', ')}` }, 10000);
         return updateSignupMessage(client);
       }
 
       if (interaction.customId === 'tzSelectNA' || interaction.customId === 'tzSelectEU') {
         const tz = interaction.values[0];
         setDefaultTz(tz);
-        return interaction.update({ content: `? Default tournament time zone set to **${tz}**`, components: [] });
+        return interaction.update({ content: `✅ Default tournament time zone set to **${tz}**`, components: [] });
       }
     }
 
@@ -590,8 +709,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isModalSubmit()) {
       if (interaction.customId === 'setnickModal') {
         const nickname = interaction.fields.getTextInputValue('nickname').trim();
+        
+        // Validate nickname length
+        if (nickname.length > 233) {
+          return timedReply(interaction, { content: '❌ Nickname is too long! Maximum 233 characters allowed.' }, 10000);
+        }
+        
         setNickname(interaction.user.id, nickname);
-        return timedReply(interaction, { content: `? Nickname set to: ${nickname}` }, 10000);
+        await updateSignupMessage(client); // Refresh the signup message with updated names
+        return timedReply(interaction, { content: `✅ Nickname set to: ${nickname}` }, 10000);
       }
 
       if (interaction.customId === 'signupFriendsModal') {
@@ -612,52 +738,94 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const newNames = names.filter(n => !global.has(n.toLowerCase()));
 
         if (newNames.length === 0) {
-          return timedReply(interaction, { content: '?? All of those names are already signed up (or were duplicates).' }, 30000);
+          return timedReply(interaction, { content: '⚠️ All of those names are already signed up (or were duplicates).' }, 30000);
         }
 
         addPlayers(interaction.user.id, newNames);
-        await timedReply(interaction, { content: `? Friends signed up: ${newNames.join(', ')}` }, 10000);
+        await timedReply(interaction, { content: `✅ Friends signed up: ${newNames.join(', ')}` }, 10000);
         return updateSignupMessage(client);
       }
 
       if (interaction.customId === 'newTournamentModal') {
-        const tname = interaction.fields.getTextInputValue('tname').trim();
-        const tdate = interaction.fields.getTextInputValue('tdate').trim();
-        const ttime = interaction.fields.getTextInputValue('ttime').trim();
-        const ampm = interaction.fields.getTextInputValue('ampm').trim().toUpperCase();
+        try {
+          // Acknowledge the interaction immediately to prevent timeout
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const tz = getDefaultTz();
-        const [month, day, year] = tdate.split('-').map(n => parseInt(n, 10));
-        const [hourRaw, minute] = ttime.split(':').map(n => parseInt(n, 10));
+          const tname = interaction.fields.getTextInputValue('tname').trim();
+          const tdate = interaction.fields.getTextInputValue('tdate').trim();
+          const ttime = interaction.fields.getTextInputValue('ttime').trim();
+          const ampm = interaction.fields.getTextInputValue('ampm').trim().toUpperCase();
 
-        let hour = hourRaw;
-        if (ampm === 'PM' && hour !== 12) hour += 12;
-        if (ampm === 'AM' && hour === 12) hour = 0;
+          const tz = getDefaultTz();
+          const [month, day, year] = tdate.split('-').map(n => parseInt(n, 10));
+          const [hourRaw, minute] = ttime.split(':').map(n => parseInt(n, 10));
 
-        const fullYear = year < 100 ? 2000 + year : year;
-        const dt = DateTime.fromObject({ year: fullYear, month, day, hour, minute }, { zone: tz });
-        const unix = Math.floor(dt.toSeconds());
+          let hour = hourRaw;
+          if (ampm === 'PM' && hour !== 12) hour += 12;
+          if (ampm === 'AM' && hour === 12) hour = 0;
 
-        setState('tournamentName', tname);
-        setState('tournamentDate', dt.toISODate());
-        setState('tournamentTime', `${dt.toFormat('MM-dd-yy hh:mm a ZZZZ')} (<t:${unix}:f>)`);
-        setTournamentStatus('scheduled');
+          const fullYear = year < 100 ? 2000 + year : year;
+          const dt = DateTime.fromObject({ year: fullYear, month, day, hour, minute }, { zone: tz });
+          const unix = Math.floor(dt.toSeconds());
 
-        await updateSignupMessage(client);
-        return interaction.reply({
-          content: `? Tournament **${tname}** scheduled for ${dt.toFormat('MM-dd-yy hh:mm a ZZZZ')} (<t:${unix}:f>)`,
-          flags: MessageFlags.Ephemeral
-        });
+          // Clear existing tournament data when creating a new tournament
+          clearPlayers();
+          setState('challongeId', null);
+          setState('challongeUrl', null);
+          setState('bracket', null);
+          
+          setState('tournamentName', tname);
+          setState('tournamentDate', dt.toISODate());
+          setState('tournamentTime', `${dt.toFormat('MM-dd-yy hh:mm a ZZZZ')} (<t:${unix}:f>)`);
+          setTournamentStatus('scheduled');
+
+          await updateSignupMessage(client);
+          
+          return await interaction.editReply({
+            content: `✅ Tournament **${tname}** scheduled for ${dt.toFormat('MM-dd-yy hh:mm a ZZZZ')} (<t:${unix}:f>)\n🗑️ Previous signups have been cleared for the new tournament.`
+          });
+        } catch (err) {
+          console.error('Error creating tournament:', err);
+          try {
+            if (interaction.deferred) {
+              return await interaction.editReply({
+                content: '❌ Something went wrong creating the tournament. Please try again.'
+              });
+            } else {
+              return await interaction.reply({
+                content: '❌ Something went wrong creating the tournament. Please try again.',
+                flags: MessageFlags.Ephemeral
+              });
+            }
+          } catch (replyErr) {
+            console.log('Could not send error reply:', replyErr);
+          }
+        }
       }
     }
   } catch (err) {
     console.error('Interaction error:', err);
     if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
       try {
-  await interaction.reply({ content: '? Something went wrong handling that interaction.', flags: MessageFlags.Ephemeral });
-      } catch {}
+        await interaction.reply({ content: '❓ Something went wrong handling that interaction.', flags: MessageFlags.Ephemeral });
+      } catch (replyErr) {
+        console.log('Could not send error reply (likely timeout)');
+      }
     }
   }
+});
+
+// Add error handlers to prevent crashes
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+});
+
+client.on('error', (error) => {
+  console.error('Discord client error:', error);
 });
 
 // --- Start Bot ---
