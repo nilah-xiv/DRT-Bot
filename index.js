@@ -47,7 +47,7 @@ const fetch = require('node-fetch');
 const {
   setState, getState,
   addPlayers, removePlayers, listPlayers,
-  clearPlayers, setNickname, getNickname,
+  clearPlayers, clearTournamentData, setNickname, getNickname,
   listUserPlayers,
   setTournamentStatus, getTournamentStatus,
   setDefaultTz, getDefaultTz
@@ -405,9 +405,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ButtonBuilder().setCustomId('newtournament').setLabel('New Tournament').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('createbracket').setLabel('Create Bracket').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('settz').setLabel('Set Default Time Zone').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('killtournament').setLabel('Kill Tournament').setStyle(ButtonStyle.Danger)
+      );
+      const row2 = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('endbracket').setLabel('End Bracket').setStyle(ButtonStyle.Danger)
       );
-      const components = [row1];
+      const components = [row1, row2];
       const challongeUrl = getState('challongeUrl');
       if (challongeUrl) {
         const row2 = new ActionRowBuilder().addComponents(
@@ -645,21 +648,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const bracket = { name: tname, time: ttime, players: [...players], createdAt: new Date().toISOString() };
         setState('bracket', bracket);
 
+        let deferred = true;
+        try {
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        } catch (ackErr) {
+          deferred = false;
+          console.error('Failed to acknowledge create bracket interaction:', ackErr);
+        }
+
+        if (!deferred) {
+          // Interaction token is no longer valid; avoid additional replies that would throw.
+          return;
+        }
+
         try {
           const tourn = await pushToChallonge(bracket);
           setState('challongeId', tourn.id);
           setState('challongeUrl', tourn.full_challonge_url);
 
-          await interaction.reply({
-            content: `🏆 Bracket created on Challonge for **${tname}** with ${players.length} players.\n${tourn.full_challonge_url}`,
-            flags: MessageFlags.Ephemeral
-          });
+          try {
+            const channel = await client.channels.fetch(getState('signupChannelId'));
+            await channel.send(`🏆 Bracket for **${tname}** is live!\n${tourn.full_challonge_url}`);
+          } catch (announceErr) {
+            console.error('Failed to announce new bracket:', announceErr);
+          }
 
-          const channel = await client.channels.fetch(getState('signupChannelId'));
-          await channel.send(`🏆 Bracket for **${tname}** is live!\n${tourn.full_challonge_url}`);
+          return await interaction.editReply({
+            content: `🏆 Bracket created on Challonge for **${tname}** with ${players.length} players.\n${tourn.full_challonge_url}`
+          });
         } catch (err) {
-          console.error(err);
-          return timedReply(interaction, { content: `❌ Failed to create Challonge tournament: ${err.message}` }, 30000);
+          console.error('Failed to create Challonge tournament:', err);
+          const errorMessage = err?.message ? `❌ Failed to create Challonge tournament: ${err.message}` : '❌ Failed to create Challonge tournament.';
+          return interaction.editReply({ content: errorMessage });
         }
       }
 
@@ -680,6 +700,50 @@ client.on(Events.InteractionCreate, async (interaction) => {
         } catch (err) {
           console.error(err);
           return interaction.reply({ content: `❌ Failed to start: ${err.message}`, flags: MessageFlags.Ephemeral });
+        }
+      }
+
+      // Kill Tournament
+      if (interaction.customId === 'killtournament') {
+        const isOwner = interaction.member.roles.cache.has(OWNER_ROLE);
+        if (!isOwner) {
+          return interaction.reply({ 
+            content: '❌ Only Owners can kill tournaments.', 
+            flags: MessageFlags.Ephemeral 
+          });
+        }
+
+        try {
+          // Clear all tournament-related data using the dedicated function
+          clearTournamentData();
+
+          // Try to update the signup message, but don't fail if it doesn't work
+          try {
+            await updateSignupMessage(client);
+          } catch (updateError) {
+            console.warn('Could not update signup message after killing tournament:', updateError);
+            // If update fails, try to post a new signup message
+            try {
+              const channelId = getState('signupChannelId');
+              if (channelId) {
+                const channel = await client.channels.fetch(channelId);
+                await postSignupMessage(channel);
+              }
+            } catch (postError) {
+              console.error('Could not post new signup message:', postError);
+            }
+          }
+          
+          return interaction.reply({
+            content: '🗑️ **Tournament killed!** All signups cleared and tournament status reset to "none".',
+            flags: MessageFlags.Ephemeral
+          });
+        } catch (error) {
+          console.error('Error killing tournament:', error);
+          return interaction.reply({
+            content: '❌ An error occurred while killing the tournament. Check the console for details.',
+            flags: MessageFlags.Ephemeral
+          });
         }
       }
 

@@ -52,6 +52,19 @@ function clearPlayers() {
   db.players = {};
   save();
 }
+
+function clearTournamentData() {
+  db.players = {};
+  if (!db.state) db.state = {};
+  db.state.tournamentName = null;
+  db.state.tournamentDate = null;
+  db.state.tournamentTime = null;
+  db.state.bracket = null;
+  db.state.challongeId = null;
+  db.state.challongeUrl = null;
+  db.state.tournamentStatus = "none";
+  save();
+}
 function setDefaultTz(tz) {
   db.state.defaultTz = tz;
   save();
@@ -111,6 +124,7 @@ module.exports = {
   listPlayers,
   listUserPlayers,
   clearPlayers,
+  clearTournamentData,
   setState,
   getState,
   setTournamentStatus,
