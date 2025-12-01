@@ -4,8 +4,8 @@ const {
   Client, GatewayIntentBits, Partials,
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle,
-  StringSelectMenuBuilder, StringSelectMenuOptionBuilder,
-  Events, MessageFlags,
+  StringSelectMenuBuilder, StringSelectMenuOptionBuilder, RoleSelectMenuBuilder,
+  Events, MessageFlags, PermissionsBitField,
   REST, Routes,
   SlashCommandBuilder
 } = require('discord.js');
@@ -18,10 +18,9 @@ async function registerSlashCommands() {
       .toJSON()
   ];
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-  const guildId = process.env.GUILD_ID;
   const appId = (await client.application?.fetch())?.id;
-  if (!guildId) {
-    console.error('GUILD_ID is not set in your .env file. Please set it to your server ID.');
+  if (!ALLOWED_GUILD_IDS.length) {
+    console.error('No ALLOWED_GUILD_IDS (or GUILD_ID) set in .env. Set ALLOWED_GUILD_IDS to a comma-separated list of guild IDs you have approved.');
     return;
   }
   try {
@@ -32,12 +31,18 @@ async function registerSlashCommands() {
       await rest.delete(Routes.applicationCommand(appId, drtGlobal.id));
       console.log('Removed global /drtadmin command');
     }
-    // Register only as a guild command
-    await rest.put(
-      Routes.applicationGuildCommands(appId, guildId),
-      { body: commands }
-    );
-    console.log('Registered /drtadmin as a guild command');
+    // Register for each allowed guild
+    for (const guildId of ALLOWED_GUILD_IDS) {
+      try {
+        await rest.put(
+          Routes.applicationGuildCommands(appId, guildId),
+          { body: commands }
+        );
+        console.log(`Registered /drtadmin for guild ${guildId}`);
+      } catch (guildErr) {
+        console.error(`Failed to register /drtadmin for guild ${guildId}:`, guildErr);
+      }
+    }
   } catch (err) {
     console.error('Failed to register/cleanup slash command:', err);
   }
@@ -62,6 +67,33 @@ const client = new Client({
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const OWNER_ROLE = process.env.OWNER_ROLE_ID;
 const STAFF_ROLE = process.env.STAFF_ROLE_ID;
+const ALLOWED_GUILD_IDS = (process.env.ALLOWED_GUILD_IDS || process.env.GUILD_ID || '')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean);
+
+function resolveOwnerRoleId(guildId) {
+  return getState(guildId, 'ownerRoleId') || OWNER_ROLE || null;
+}
+
+function resolveStaffRoleId(guildId) {
+  return getState(guildId, 'staffRoleId') || STAFF_ROLE || null;
+}
+
+function getAdminFlags(interaction, guildId) {
+  const member = interaction.member;
+  const ownerId = resolveOwnerRoleId(guildId);
+  const staffId = resolveStaffRoleId(guildId);
+  const hasOwnerRole = ownerId ? member?.roles?.cache?.has(ownerId) : false;
+  const hasStaffRole = staffId ? member?.roles?.cache?.has(staffId) : false;
+  const hasAdminPerm = member?.permissions?.has(PermissionsBitField.Flags.Administrator);
+  return {
+    hasOwnerRole,
+    hasStaffRole,
+    hasAdminPerm,
+    isAdmin: !!(hasOwnerRole || hasStaffRole || hasAdminPerm)
+  };
+}
 
 // Cache admin remove menu options per user to avoid large option payloads
 const adminRemovalCache = new Map();
@@ -94,34 +126,34 @@ const euZones = [
 ];
 
 // --- Build Signup Buttons ---
-function buildSignupRows(status) {
+function buildSignupRows(status, guildId) {
   if (status === 'none') {
     // Only show the Interact button
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('interact').setLabel('Interact').setStyle(ButtonStyle.Primary)
     );
     return [row];
-  } else {
-    // Show all regular buttons except admin
-    const row = new ActionRowBuilder();
-    if (status === 'scheduled') {
-      row.addComponents(
-        new ButtonBuilder().setCustomId('signup').setLabel('Sign Me Up').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('setnick').setLabel('Set Nickname').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('signupfriends').setLabel('Sign Up Friends').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('withdraw').setLabel('Withdraw').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId('list').setLabel('List Players').setStyle(ButtonStyle.Secondary)
-      );
-    } else if (status === 'in-progress') {
-      const challongeUrl = getState('challongeUrl');
-      if (challongeUrl) {
-        row.addComponents(
-          new ButtonBuilder().setLabel('View Bracket').setStyle(ButtonStyle.Link).setURL(challongeUrl)
-        );
-      }
-    }
-    return [row];
   }
+
+  // Show all regular buttons except admin
+  const row = new ActionRowBuilder();
+  if (status === 'scheduled') {
+    row.addComponents(
+      new ButtonBuilder().setCustomId('signup').setLabel('Sign Me Up').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('setnick').setLabel('Set Nickname').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('signupfriends').setLabel('Sign Up Friends').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('withdraw').setLabel('Withdraw').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('list').setLabel('List Players').setStyle(ButtonStyle.Secondary)
+    );
+  } else if (status === 'in-progress') {
+    const challongeUrl = getState(guildId, 'challongeUrl');
+    if (challongeUrl) {
+      row.addComponents(
+        new ButtonBuilder().setLabel('View Bracket').setStyle(ButtonStyle.Link).setURL(challongeUrl)
+      );
+    }
+  }
+  return [row];
 }
 
 // --- Challonge Integration ---
@@ -203,11 +235,11 @@ async function getCurrentMatch(tournamentId) {
 }
 
 // --- Signup Message ---
-async function postSignupMessage(channel) {
-  const players = listPlayers();
-  const tname = getState('tournamentName') || 'Death Roll Tournament';
-  const ttime = getState('tournamentTime') || 'TBD';
-  const status = getTournamentStatus();
+async function postSignupMessage(channel, guildId) {
+  const players = listPlayers(guildId);
+  const tname = getState(guildId, 'tournamentName') || 'Death Roll Tournament';
+  const ttime = getState(guildId, 'tournamentTime') || 'TBD';
+  const status = getTournamentStatus(guildId);
 
   let content;
   if (status === 'none') {
@@ -215,10 +247,10 @@ async function postSignupMessage(channel) {
   } else if (status === 'scheduled') {
     content = `⚔️ **${tname}**\nScheduled: ${ttime}\nCurrent signups: **${players.length}**`;
   } else {
-    const challongeUrl = getState('challongeUrl');
+    const challongeUrl = getState(guildId, 'challongeUrl');
     if (challongeUrl) {
       // Get current match info for live tournaments
-      const challongeId = getState('challongeId');
+      const challongeId = getState(guildId, 'challongeId');
       if (challongeId) {
         const currentMatch = await getCurrentMatch(challongeId);
         if (currentMatch) {
@@ -234,26 +266,26 @@ async function postSignupMessage(channel) {
     }
   }
 
-  const rows = buildSignupRows(status);
+  const rows = buildSignupRows(status, guildId);
 
   const msg = await channel.send({ content, components: rows });
-  setState('signupMessageId', msg.id);
-  setState('signupChannelId', channel.id);
+  setState(guildId, 'signupMessageId', msg.id);
+  setState(guildId, 'signupChannelId', channel.id);
   return msg;
 }
 
 // --- Update Signup Message ---
-async function updateSignupMessage(client) {
-  const messageId = getState('signupMessageId');
-  const channelId = getState('signupChannelId');
+async function updateSignupMessage(client, guildId) {
+  const messageId = getState(guildId, 'signupMessageId');
+  const channelId = getState(guildId, 'signupChannelId');
   if (!messageId || !channelId) return;
 
   const channel = await client.channels.fetch(channelId);
   const msg = await channel.messages.fetch(messageId);
-  const players = listPlayers();
-  const tname = getState('tournamentName') || 'Death Roll Tournament';
-  const ttime = getState('tournamentTime') || 'TBD';
-  const status = getTournamentStatus();
+  const players = listPlayers(guildId);
+  const tname = getState(guildId, 'tournamentName') || 'Death Roll Tournament';
+  const ttime = getState(guildId, 'tournamentTime') || 'TBD';
+  const status = getTournamentStatus(guildId);
 
   let content;
   if (status === 'none') {
@@ -261,10 +293,10 @@ async function updateSignupMessage(client) {
   } else if (status === 'scheduled') {
     content = `⚔️ **${tname}**\nScheduled: ${ttime}\nCurrent signups: **${players.length}**`;
   } else {
-    const challongeUrl = getState('challongeUrl');
+    const challongeUrl = getState(guildId, 'challongeUrl');
     if (challongeUrl) {
       // Get current match info for live tournaments
-      const challongeId = getState('challongeId');
+      const challongeId = getState(guildId, 'challongeId');
       if (challongeId) {
         const currentMatch = await getCurrentMatch(challongeId);
         if (currentMatch) {
@@ -280,7 +312,7 @@ async function updateSignupMessage(client) {
     }
   }
 
-  const rows = buildSignupRows(status);
+  const rows = buildSignupRows(status, guildId);
   await msg.edit({ content, components: rows });
 }
 
@@ -292,8 +324,8 @@ async function timedReply(interaction, options, duration = 10000) {
 }
 
 // --- End Existing Bracket ---
-async function endExistingBracket(interaction) {
-  const existingId = getState('challongeId');
+async function endExistingBracket(interaction, guildId) {
+  const existingId = getState(guildId, 'challongeId');
   if (!existingId) {
     return timedReply(interaction, { content: '❌ No existing bracket to end.' }, 30000);
   }
@@ -308,10 +340,10 @@ async function endExistingBracket(interaction) {
 
     // 2) If already complete, just clear local state
     if (state === 'complete') {
-      setState('challongeId', null);
-      setState('challongeUrl', null);
-      setTournamentStatus('none');
-      await updateSignupMessage(client);
+      setState(guildId, 'challongeId', null);
+      setState(guildId, 'challongeUrl', null);
+      setTournamentStatus(guildId, 'none');
+      await updateSignupMessage(client, guildId);
       return timedReply(interaction, { content: '✅ Bracket is already complete. Cleared saved bracket and reset status.' }, 30000);
     }
 
@@ -323,10 +355,10 @@ async function endExistingBracket(interaction) {
     if (!finRes.ok) {
       const errText = await finRes.text();
       // Fallback: clear local state even if Challonge refuses finalize (e.g., missing scores)
-      setState('challongeId', null);
-      setState('challongeUrl', null);
-      setTournamentStatus('none');
-      await updateSignupMessage(client);
+      setState(guildId, 'challongeId', null);
+      setState(guildId, 'challongeUrl', null);
+      setTournamentStatus(guildId, 'none');
+      await updateSignupMessage(client, guildId);
       return timedReply(
         interaction,
         { content: `⚠️ Could not finalize on Challonge (${errText.trim()}). Cleared saved bracket locally so you can create a new one.` },
@@ -335,18 +367,18 @@ async function endExistingBracket(interaction) {
     }
 
     // 4) Finalized successfully
-    setState('challongeId', null);
-    setState('challongeUrl', null);
-    setTournamentStatus('none');
-    await updateSignupMessage(client);
+    setState(guildId, 'challongeId', null);
+    setState(guildId, 'challongeUrl', null);
+    setTournamentStatus(guildId, 'none');
+    await updateSignupMessage(client, guildId);
     return timedReply(interaction, { content: '✅ Bracket finalized on Challonge and cleared locally.' }, 30000);
   } catch (err) {
     console.error('Error finalizing bracket:', err);
     // Fallback: clear locally so workflow can continue
-    setState('challongeId', null);
-    setState('challongeUrl', null);
-    setTournamentStatus('none');
-    try { await updateSignupMessage(client); } catch {}
+    setState(guildId, 'challongeId', null);
+    setState(guildId, 'challongeUrl', null);
+    setTournamentStatus(guildId, 'none');
+    try { await updateSignupMessage(client, guildId); } catch {}
     return timedReply(
       interaction,
       { content: `⚠️ Could not reach Challonge to finalize (details in logs). Cleared saved bracket locally so you can proceed.` },
@@ -358,32 +390,47 @@ async function endExistingBracket(interaction) {
 // --- Bot Startup ---
 client.once(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
-  const channel = await client.channels.fetch(CHANNEL_ID);
 
   // Register slash commands
   await registerSlashCommands();
 
-  try {
-    const messageId = getState('signupMessageId');
-    if (messageId) {
-      try {
-        const oldMsg = await channel.messages.fetch(messageId);
-        await oldMsg.delete();
-      } catch {}
+  // Restore/signup message per allowed guild if a channel is stored
+  for (const guildId of ALLOWED_GUILD_IDS) {
+    const legacyGuildId = (process.env.GUILD_ID || '').trim();
+    const channelId = getState(guildId, 'signupChannelId') ||
+      (legacyGuildId && guildId === legacyGuildId ? CHANNEL_ID : null); // fallback to env only for the legacy primary guild
+    if (!channelId) {
+      console.warn(`No signup channel configured for guild ${guildId}; run /drtadmin in the desired channel to set it.`);
+      continue;
     }
-    await postSignupMessage(channel);
-    console.log('Posted signup message based on tournament status');
-  } catch (err) {
-    console.error('Startup error:', err);
-    await postSignupMessage(channel);
+    try {
+      const channel = await client.channels.fetch(channelId);
+      try {
+        const messageId = getState(guildId, 'signupMessageId');
+        if (messageId) {
+          try {
+            const oldMsg = await channel.messages.fetch(messageId);
+            await oldMsg.delete();
+          } catch {}
+        }
+        await postSignupMessage(channel, guildId);
+        console.log(`Posted signup message for guild ${guildId}`);
+      } catch (err) {
+        console.error(`Startup error posting signup message for guild ${guildId}:`, err);
+      }
+    } catch (err) {
+      console.error(`Could not fetch signup channel ${channelId} for guild ${guildId}:`, err);
+    }
   }
 
   // Start periodic updates for current match info
   setInterval(async () => {
     try {
-      const status = getTournamentStatus();
-      if (status === 'in-progress') {
-        await updateSignupMessage(client);
+      for (const guildId of ALLOWED_GUILD_IDS) {
+        const status = getTournamentStatus(guildId);
+        if (status === 'in-progress') {
+          await updateSignupMessage(client, guildId);
+        }
       }
     } catch (error) {
       console.error('Error updating current match:', error);
@@ -391,22 +438,59 @@ client.once(Events.ClientReady, async () => {
   }, 5000); // Update every 5 seconds
 });
 
+// Auto-leave any guilds not in the allowlist
+client.on(Events.GuildCreate, async (guild) => {
+  const allowed = ALLOWED_GUILD_IDS;
+  if (allowed.length > 0 && !allowed.includes(guild.id)) {
+    console.warn(`Joined unauthorized guild ${guild.id} (${guild.name}). Leaving...`);
+    try {
+      await guild.leave();
+      console.warn(`Left unauthorized guild ${guild.id}.`);
+    } catch (err) {
+      console.error(`Failed to leave unauthorized guild ${guild.id}:`, err);
+    }
+  }
+});
+
 // --- Interactions ---
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    const guildId = interaction.guildId;
+    if (!guildId || (ALLOWED_GUILD_IDS.length > 0 && !ALLOWED_GUILD_IDS.includes(guildId))) {
+      if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+        try {
+          await interaction.reply({ content: 'Not authorized to use this bot on this server.', flags: MessageFlags.Ephemeral });
+        } catch (replyErr) {
+          console.error('Failed to send unauthorized reply:', replyErr);
+        }
+      }
+      return;
+    }
+
     // --- Handle /drtadmin slash command ---
     if (interaction.isChatInputCommand && interaction.commandName === 'drtadmin') {
-      const hasOwnerRole = interaction.member?.roles?.cache?.has(OWNER_ROLE);
-      const hasStaffRole = STAFF_ROLE && interaction.member?.roles?.cache?.has(STAFF_ROLE);
-      const isAdmin = hasOwnerRole || hasStaffRole;
-      
-      if (!isAdmin) {
+      const adminFlags = getAdminFlags(interaction, guildId);
+      if (!adminFlags.isAdmin) {
         return interaction.reply({ content: '❌ Not allowed.', ephemeral: true });
       }
+      // If this guild has no signup channel yet, default to the current channel and post the signup message
+      let signupChannelId = getState(guildId, 'signupChannelId');
+      if (!signupChannelId && interaction.channel) {
+        try {
+          await postSignupMessage(interaction.channel, guildId);
+          signupChannelId = interaction.channel.id;
+          console.log(`Initialized signup channel for guild ${guildId} to ${signupChannelId}`);
+        } catch (initErr) {
+          console.error('Failed to bootstrap signup message for guild', guildId, initErr);
+        }
+      }
+
       const adminButtons = [
         new ButtonBuilder().setCustomId('start').setLabel('Start Bracket').setStyle(ButtonStyle.Danger),
         new ButtonBuilder().setCustomId('newtournament').setLabel('New Tournament').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('createbracket').setLabel('Create Bracket').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('setchannel').setLabel('Set Signup Channel').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('setroles').setLabel('Set Roles').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('settz').setLabel('Set Default Time Zone').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('removeplayer').setLabel('Remove Player').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('killtournament').setLabel('Kill Tournament').setStyle(ButtonStyle.Danger),
@@ -420,7 +504,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           components.push(new ActionRowBuilder().addComponents(...slice));
         }
       }
-      const challongeUrl = getState('challongeUrl');
+      const challongeUrl = getState(guildId, 'challongeUrl');
       if (challongeUrl) {
         const row2 = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setLabel('View Bracket').setStyle(ButtonStyle.Link).setURL(challongeUrl)
@@ -441,10 +525,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isButton()) {
       // Interact button handler
       if (interaction.customId === 'interact') {
-        const status = getTournamentStatus();
-        const hasOwnerRole = interaction.member?.roles?.cache?.has(OWNER_ROLE);
-        const hasStaffRole = STAFF_ROLE && interaction.member?.roles?.cache?.has(STAFF_ROLE);
-        const isAdmin = hasOwnerRole || hasStaffRole;
+        const status = getTournamentStatus(guildId);
         const rows = [];
         const row = new ActionRowBuilder();
         // Always show Set Nickname
@@ -471,20 +552,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       // Sign up
       if (interaction.customId === 'signup') {
-        if (getTournamentStatus() !== 'scheduled') {
+        if (getTournamentStatus(guildId) !== 'scheduled') {
           return timedReply(interaction, { content: 'Signups are closed right now.' }, 30000);
         }
-        const nick = getNickname(interaction.user.id);
+        const nick = getNickname(guildId, interaction.user.id);
         const displayName = nick || interaction.member?.displayName || interaction.user.username;
 
-        const existing = listPlayers();
+        const existing = listPlayers(guildId);
         if (existing.includes(displayName)) {
           return timedReply(interaction, { content: `⚠️ You're already signed up as **${displayName}**.` }, 30000);
         }
 
-        addPlayers(interaction.user.id, [displayName]);
+        addPlayers(guildId, interaction.user.id, [displayName]);
         await timedReply(interaction, { content: `✅ Signed up: ${displayName}` }, 10000);
-        return updateSignupMessage(client);
+        return updateSignupMessage(client, guildId);
       }
 
       // Set Nickname
@@ -505,7 +586,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // Sign up Friends
       if (interaction.customId === 'signupfriends') {
-        if (getTournamentStatus() !== 'scheduled') {
+        if (getTournamentStatus(guildId) !== 'scheduled') {
           return timedReply(interaction, { content: 'Signups are closed right now.' }, 30000);
         }
         const modal = new ModalBuilder()
@@ -522,7 +603,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // Withdraw
       if (interaction.customId === 'withdraw') {
-        const mine = listUserPlayers(interaction.user.id);
+        const mine = listUserPlayers(guildId, interaction.user.id);
         if (!mine || mine.length === 0) {
           return timedReply(interaction, { content: '❌ You have no signups to withdraw.' }, 30000);
         }
@@ -560,18 +641,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // Withdraw All
       if (interaction.customId === 'withdrawAll') {
-        const mine = listUserPlayers(interaction.user.id);
+        const mine = listUserPlayers(guildId, interaction.user.id);
         if (mine.length === 0) {
           return interaction.update({ content: '❌ Nothing to withdraw.', components: [] });
         }
-        removePlayers(interaction.user.id, mine);
+        removePlayers(guildId, interaction.user.id, mine);
         await interaction.update({ content: '✅ All your signups have been withdrawn.', components: [] });
-        return updateSignupMessage(client);
+        return updateSignupMessage(client, guildId);
       }
 
       // List Players
       if (interaction.customId === 'list') {
-        const entries = getAllPlayerEntries();
+        const entries = getAllPlayerEntries(guildId);
         console.log('List button entries count:', entries.length);
         if (entries.length === 0) {
           return timedReply(interaction, { content: '📝 No signups yet.' }, 30000);
@@ -635,22 +716,113 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // Admin Remove Player
+      // Set Signup Channel (admin)
+      if (interaction.customId === 'setchannel') {
+        const adminFlags = getAdminFlags(interaction, guildId);
+        if (!adminFlags.isAdmin) {
+          return interaction.reply({ content: '🚫 Only Owners or Staff can set the signup channel.', flags: MessageFlags.Ephemeral });
+        }
+        const targetChannel = interaction.channel;
+        if (!targetChannel) {
+          return timedReply(interaction, { content: '🚫 Cannot set signup channel here.', flags: MessageFlags.Ephemeral }, 30000);
+        }
+
+        const oldChannelId = getState(guildId, 'signupChannelId');
+        const oldMessageId = getState(guildId, 'signupMessageId');
+        if (oldChannelId && oldMessageId) {
+          try {
+            const oldChannel = await client.channels.fetch(oldChannelId);
+            const oldMsg = await oldChannel.messages.fetch(oldMessageId);
+            await oldMsg.delete();
+          } catch (err) {
+            console.warn('Could not delete previous signup message:', err);
+          }
+        }
+
+        try {
+          await postSignupMessage(targetChannel, guildId);
+          return timedReply(interaction, { content: `✅ Signup channel set to <#${targetChannel.id}> and signup message refreshed.`, flags: MessageFlags.Ephemeral }, 30000);
+        } catch (err) {
+          console.error('Failed to set signup channel:', err);
+          return timedReply(interaction, { content: '🚫 Failed to set signup channel. Check bot permissions and try again.', flags: MessageFlags.Ephemeral }, 30000);
+        }
+      }
+
+      // Set Roles (admin)
+      if (interaction.customId === 'setroles') {
+        const adminFlags = getAdminFlags(interaction, guildId);
+        if (!(adminFlags.hasOwnerRole || adminFlags.hasAdminPerm)) {
+          return interaction.reply({ content: '🚫 Only Owners (or server admins) can set roles.', flags: MessageFlags.Ephemeral });
+        }
+
+        const ownerRoleId = resolveOwnerRoleId(guildId);
+        const staffRoleId = resolveStaffRoleId(guildId);
+
+        const ownerSelect = new RoleSelectMenuBuilder()
+          .setCustomId('ownerRoleSelect')
+          .setPlaceholder('Select Owner role')
+          .setMinValues(1)
+          .setMaxValues(1);
+
+        const staffSelect = new RoleSelectMenuBuilder()
+          .setCustomId('staffRoleSelect')
+          .setPlaceholder('Select Staff role (optional)')
+          .setMinValues(0)
+          .setMaxValues(1);
+
+        const clearStaff = new ButtonBuilder()
+          .setCustomId('clearStaffRole')
+          .setLabel('Clear Staff Role')
+          .setStyle(ButtonStyle.Secondary);
+
+        const summary = [
+          `Owner role: ${ownerRoleId ? `<@&${ownerRoleId}>` : 'not set'}`,
+          `Staff role: ${staffRoleId ? `<@&${staffRoleId}>` : 'not set'}`
+        ].join('\n');
+
+        return interaction.reply({
+          content: `Select roles to use for admin checks.\n${summary}`,
+          components: [
+            new ActionRowBuilder().addComponents(ownerSelect),
+            new ActionRowBuilder().addComponents(staffSelect),
+            new ActionRowBuilder().addComponents(clearStaff)
+          ],
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      if (interaction.customId === 'clearStaffRole') {
+        const adminFlags = getAdminFlags(interaction, guildId);
+        if (!(adminFlags.hasOwnerRole || adminFlags.hasAdminPerm)) {
+          return interaction.reply({ content: '🚫 Not allowed.', flags: MessageFlags.Ephemeral });
+        }
+        setState(guildId, 'staffRoleId', null);
+        const ownerRoleId = resolveOwnerRoleId(guildId);
+        const summary = [
+          `Owner role: ${ownerRoleId ? `<@&${ownerRoleId}>` : 'not set'}`,
+          'Staff role: not set'
+        ].join('\n');
+        return interaction.update({
+          content: `Select roles to use for admin checks.\n${summary}`,
+          components: interaction.message.components
+        });
+      }
+
       if (interaction.customId === 'removeplayer') {
-        const hasOwnerRole = interaction.member?.roles?.cache?.has(OWNER_ROLE);
-        const hasStaffRole = STAFF_ROLE && interaction.member?.roles?.cache?.has(STAFF_ROLE);
-        if (!hasOwnerRole && !hasStaffRole) {
+        const adminFlags = getAdminFlags(interaction, guildId);
+        if (!adminFlags.isAdmin) {
           return interaction.reply({ content: '❌ Only Owners or Staff can remove players.', flags: MessageFlags.Ephemeral });
         }
 
-        const entries = getAllPlayerEntries();
+        const entries = getAllPlayerEntries(guildId);
         if (entries.length === 0) {
           return interaction.reply({ content: '📝 No players to remove.', flags: MessageFlags.Ephemeral });
         }
 
         const chunkSize = 25;
+        const cachePrefix = `${guildId}:${interaction.user.id}:`;
         for (const key of adminRemovalCache.keys()) {
-          if (key.startsWith(`${interaction.user.id}:`)) {
+          if (key.startsWith(cachePrefix)) {
             adminRemovalCache.delete(key);
           }
         }
@@ -660,14 +832,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         for (let chunkIndex = 0, page = 0; chunkIndex < entries.length && page < rowsLimit; chunkIndex += chunkSize, page += 1) {
           const chunk = entries.slice(chunkIndex, chunkIndex + chunkSize);
-          const cacheKey = `${interaction.user.id}:${page}`;
+          const cacheKey = `${cachePrefix}${page}`;
           adminRemovalCache.set(cacheKey, chunk);
 
           const options = chunk.map(({ userId, name }, idx) => {
             const option = new StringSelectMenuOptionBuilder()
               .setLabel(String(name).substring(0, 100) || `Player ${chunkIndex + idx + 1}`)
               .setValue(String(idx));
-            const nickname = getNickname(userId);
+            const nickname = getNickname(guildId, userId);
             if (nickname) option.setDescription(nickname.substring(0, 100));
             return option;
           });
@@ -699,7 +871,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       // New Tournament
       if (interaction.customId === 'newtournament') {
         // Check if there's already an active tournament
-        const currentStatus = getTournamentStatus();
+        const currentStatus = getTournamentStatus(guildId);
         if (currentStatus === 'in-progress') {
           return interaction.reply({
             content: '❌ Cannot create a new tournament while one is currently in progress. Please end the current tournament first.',
@@ -734,28 +906,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // Create Bracket
       if (interaction.customId === 'createbracket') {
-        const isOwner = interaction.member.roles.cache.has(OWNER_ROLE);
-        if (!isOwner) return timedReply(interaction, { content: '❌ Only Owners can create brackets.' }, 30000);
+        const adminFlags = getAdminFlags(interaction, guildId);
+        if (!(adminFlags.hasOwnerRole || adminFlags.hasAdminPerm)) return timedReply(interaction, { content: '❌ Only Owners can create brackets.' }, 30000);
 
-        if (getTournamentStatus() !== 'scheduled') {
+        if (getTournamentStatus(guildId) !== 'scheduled') {
           return timedReply(interaction, { content: '❌ No scheduled tournament to create a bracket for.' }, 30000);
         }
 
-        const existingId = getState('challongeId');
+        const existingId = getState(guildId, 'challongeId');
         if (existingId) {
-          const url = getState('challongeUrl');
+          const url = getState(guildId, 'challongeUrl');
           return timedReply(interaction, { content: `⚠️ A Challonge tournament already exists.\n${url ?? '(no url saved)'}` }, 30000);
         }
 
-        const players = listPlayers();
+        const players = listPlayers(guildId);
         if (players.length < 2) {
           return timedReply(interaction, { content: '❌ Not enough players to create a bracket.' }, 30000);
         }
 
-        const tname = getState('tournamentName') || 'Death Roll Tournament';
-        const ttime = getState('tournamentTime') || 'TBD';
+        const tname = getState(guildId, 'tournamentName') || 'Death Roll Tournament';
+        const ttime = getState(guildId, 'tournamentTime') || 'TBD';
         const bracket = { name: tname, time: ttime, players: [...players], createdAt: new Date().toISOString() };
-        setState('bracket', bracket);
+        setState(guildId, 'bracket', bracket);
 
         let deferred = true;
         try {
@@ -772,11 +944,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         try {
           const tourn = await pushToChallonge(bracket);
-          setState('challongeId', tourn.id);
-          setState('challongeUrl', tourn.full_challonge_url);
+          setState(guildId, 'challongeId', tourn.id);
+          setState(guildId, 'challongeUrl', tourn.full_challonge_url);
 
           try {
-            const channel = await client.channels.fetch(getState('signupChannelId'));
+            const channel = await client.channels.fetch(getState(guildId, 'signupChannelId'));
             await channel.send(`🏆 Bracket for **${tname}** is live!\n${tourn.full_challonge_url}`);
           } catch (announceErr) {
             console.error('Failed to announce new bracket:', announceErr);
@@ -794,17 +966,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // Start Bracket
       if (interaction.customId === 'start') {
-        const isOwner = interaction.member.roles.cache.has(OWNER_ROLE);
-  if (!isOwner) return interaction.reply({ content: '❌ Only Owners can start the bracket.', flags: MessageFlags.Ephemeral });
+        const adminFlags = getAdminFlags(interaction, guildId);
+        if (!(adminFlags.hasOwnerRole || adminFlags.hasAdminPerm)) return interaction.reply({ content: '?? Only Owners can start the bracket.', flags: MessageFlags.Ephemeral });
 
-        const tid = getState('challongeId');
-  if (!tid) return interaction.reply({ content: '❌ No Challonge tournament created yet.', flags: MessageFlags.Ephemeral });
+        const tid = getState(guildId, 'challongeId');
+        if (!tid) return interaction.reply({ content: '?? No Challonge tournament created yet.', flags: MessageFlags.Ephemeral });
 
         try {
+
+
           await startChallongeTournament(tid);
-          clearPlayers();
-          setTournamentStatus('in-progress');
-          await updateSignupMessage(client);
+          clearPlayers(guildId);
+          setTournamentStatus(guildId, 'in-progress');
+          await updateSignupMessage(client, guildId);
           return interaction.reply({ content: '🏆 Tournament started on Challonge!', flags: MessageFlags.Ephemeral });
         } catch (err) {
           console.error(err);
@@ -814,29 +988,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // Kill Tournament
       if (interaction.customId === 'killtournament') {
-        const isOwner = interaction.member.roles.cache.has(OWNER_ROLE);
-        if (!isOwner) {
+        const adminFlags = getAdminFlags(interaction, guildId);
+        if (!(adminFlags.hasOwnerRole || adminFlags.hasAdminPerm)) {
           return interaction.reply({ 
-            content: '❌ Only Owners can kill tournaments.', 
+            content: '?? Only Owners can kill tournaments.', 
             flags: MessageFlags.Ephemeral 
           });
         }
 
         try {
+
           // Clear all tournament-related data using the dedicated function
-          clearTournamentData();
+          clearTournamentData(guildId);
 
           // Try to update the signup message, but don't fail if it doesn't work
           try {
-            await updateSignupMessage(client);
+            await updateSignupMessage(client, guildId);
           } catch (updateError) {
             console.warn('Could not update signup message after killing tournament:', updateError);
             // If update fails, try to post a new signup message
             try {
-              const channelId = getState('signupChannelId');
+              const channelId = getState(guildId, 'signupChannelId');
               if (channelId) {
                 const channel = await client.channels.fetch(channelId);
-                await postSignupMessage(channel);
+                await postSignupMessage(channel, guildId);
               }
             } catch (postError) {
               console.error('Could not post new signup message:', postError);
@@ -862,24 +1037,49 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
     }
 
+    // Role Select Menus (owner/staff config)
+    if (interaction.isRoleSelectMenu()) {
+      const adminFlags = getAdminFlags(interaction, guildId);
+      if (!(adminFlags.hasOwnerRole || adminFlags.hasAdminPerm)) {
+        return interaction.update({ content: '🚫 Not allowed.', components: [] });
+      }
+
+      const updateSummary = () => {
+        const ownerRoleId = resolveOwnerRoleId(guildId);
+        const staffRoleId = resolveStaffRoleId(guildId);
+        return `Select roles to use for admin checks.\nOwner role: ${ownerRoleId ? `<@&${ownerRoleId}>` : 'not set'}\nStaff role: ${staffRoleId ? `<@&${staffRoleId}>` : 'not set'}`;
+      };
+
+      if (interaction.customId === 'ownerRoleSelect') {
+        const roleId = interaction.values[0];
+        setState(guildId, 'ownerRoleId', roleId);
+        return interaction.update({ content: updateSummary(), components: interaction.message.components });
+      }
+
+      if (interaction.customId === 'staffRoleSelect') {
+        const roleId = interaction.values[0];
+        if (roleId) setState(guildId, 'staffRoleId', roleId);
+        return interaction.update({ content: updateSummary(), components: interaction.message.components });
+      }
+    }
+
     // Select Menus
-       if (interaction.isStringSelectMenu()) {
+    if (interaction.isStringSelectMenu()) {
       if (interaction.customId === 'withdrawSelect') {
         const selected = interaction.values.map(v => v.split('-')[0]); // strip index
-        removePlayers(interaction.user.id, selected);
+        removePlayers(guildId, interaction.user.id, selected);
         await timedReply(interaction, { content: `🗑️ Removed: ${selected.join(', ')}` }, 10000);
-        return updateSignupMessage(client);
+        return updateSignupMessage(client, guildId);
       }
 
       if (interaction.customId.startsWith('adminRemoveSelect')) {
-        const hasOwnerRole = interaction.member?.roles?.cache?.has(OWNER_ROLE);
-        const hasStaffRole = STAFF_ROLE && interaction.member?.roles?.cache?.has(STAFF_ROLE);
-        if (!hasOwnerRole && !hasStaffRole) {
+        const adminFlags = getAdminFlags(interaction, guildId);
+        if (!adminFlags.isAdmin) {
           return interaction.update({ content: '❌ Not allowed.', components: [] });
         }
 
         const [, pageStr = '0'] = interaction.customId.split(':');
-        const cacheKey = `${interaction.user.id}:${pageStr}`;
+        const cacheKey = `${guildId}:${interaction.user.id}:${pageStr}`;
         const cachedEntries = adminRemovalCache.get(cacheKey) || [];
 
         const removed = [];
@@ -893,7 +1093,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               continue;
             }
             const payload = cachedEntries[idx];
-            const ok = payload && removePlayerForUser(payload.userId, payload.name);
+            const ok = payload && removePlayerForUser(guildId, payload.userId, payload.name);
             if (ok) {
               removed.push(payload.name);
             } else {
@@ -926,13 +1126,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const message = parts.join('\n');
 
         await interaction.update({ content: message, components: [] });
-        await updateSignupMessage(client);
+        await updateSignupMessage(client, guildId);
         return;
       }
 
       if (interaction.customId === 'tzSelectNA' || interaction.customId === 'tzSelectEU') {
         const tz = interaction.values[0];
-        setDefaultTz(tz);
+        setDefaultTz(guildId, tz);
         return interaction.update({ content: `✅ Default tournament time zone set to **${tz}**`, components: [] });
       }
     }
@@ -947,8 +1147,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return timedReply(interaction, { content: '❌ Nickname is too long! Maximum 233 characters allowed.' }, 10000);
         }
         
-        setNickname(interaction.user.id, nickname);
-        await updateSignupMessage(client); // Refresh the signup message with updated names
+        setNickname(guildId, interaction.user.id, nickname);
+        await updateSignupMessage(client, guildId); // Refresh the signup message with updated names
         return timedReply(interaction, { content: `✅ Nickname set to: ${nickname}` }, 10000);
       }
 
@@ -966,16 +1166,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
 
         // Remove those already signed up globally
-        const global = new Set(listPlayers().map(n => n.toLowerCase()));
+        const global = new Set(listPlayers(guildId).map(n => n.toLowerCase()));
         const newNames = names.filter(n => !global.has(n.toLowerCase()));
 
         if (newNames.length === 0) {
           return timedReply(interaction, { content: '⚠️ All of those names are already signed up (or were duplicates).' }, 30000);
         }
 
-        addPlayers(interaction.user.id, newNames);
+        addPlayers(guildId, interaction.user.id, newNames);
         await timedReply(interaction, { content: `✅ Friends signed up: ${newNames.join(', ')}` }, 10000);
-        return updateSignupMessage(client);
+        return updateSignupMessage(client, guildId);
       }
 
       if (interaction.customId === 'newTournamentModal') {
@@ -988,7 +1188,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const ttime = interaction.fields.getTextInputValue('ttime').trim();
           const ampm = interaction.fields.getTextInputValue('ampm').trim().toUpperCase();
 
-          const tz = getDefaultTz();
+          const tz = getDefaultTz(guildId);
           const [month, day, year] = tdate.split('-').map(n => parseInt(n, 10));
           const [hourRaw, minute] = ttime.split(':').map(n => parseInt(n, 10));
 
@@ -1001,17 +1201,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const unix = Math.floor(dt.toSeconds());
 
           // Clear existing tournament data when creating a new tournament
-          clearPlayers();
-          setState('challongeId', null);
-          setState('challongeUrl', null);
-          setState('bracket', null);
+          clearPlayers(guildId);
+          setState(guildId, 'challongeId', null);
+          setState(guildId, 'challongeUrl', null);
+          setState(guildId, 'bracket', null);
           
-          setState('tournamentName', tname);
-          setState('tournamentDate', dt.toISODate());
-          setState('tournamentTime', `${dt.toFormat('MM-dd-yy hh:mm a ZZZZ')} (<t:${unix}:f>)`);
-          setTournamentStatus('scheduled');
+          setState(guildId, 'tournamentName', tname);
+          setState(guildId, 'tournamentDate', dt.toISODate());
+          setState(guildId, 'tournamentTime', `${dt.toFormat('MM-dd-yy hh:mm a ZZZZ')} (<t:${unix}:f>)`);
+          setTournamentStatus(guildId, 'scheduled');
 
-          await updateSignupMessage(client);
+          await updateSignupMessage(client, guildId);
           
           return await interaction.editReply({
             content: `✅ Tournament **${tname}** scheduled for ${dt.toFormat('MM-dd-yy hh:mm a ZZZZ')} (<t:${unix}:f>)\n🗑️ Previous signups have been cleared for the new tournament.`
