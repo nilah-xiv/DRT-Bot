@@ -333,7 +333,12 @@ async function pushToChallonge(bracket, auth) {
   }
 
   const payload = useV2
-    ? { data: { type: 'tournaments', attributes: { name: bracket.name, tournament_type: 'single_elimination' } } }
+    ? {
+        data: {
+          type: 'Tournaments',
+          attributes: { name: bracket.name, tournament_type: 'single_elimination' }
+        }
+      }
     : { tournament: { name: bracket.name, tournament_type: 'single_elimination' } };
 
   const res = await fetch(url, {
@@ -354,7 +359,7 @@ async function pushToChallonge(bracket, auth) {
       pUrl += `?api_key=${auth.legacyKey}`;
     }
     const pPayload = useV2
-      ? { data: { type: 'participants', attributes: { name: player } } }
+      ? { data: { type: 'Participants', attributes: { name: player } } }
       : { participant: { name: player } };
     const pr = await fetch(pUrl, {
       method: 'POST',
@@ -380,7 +385,7 @@ async function startChallongeTournament(tid, auth) {
   const res = await fetch(url, {
     method: 'POST',
     headers,
-    body: useV2 ? JSON.stringify({ data: { type: 'tournaments', id: tid } }) : undefined
+    body: useV2 ? JSON.stringify({ data: { type: 'Tournaments', id: tid } }) : undefined
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
