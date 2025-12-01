@@ -71,13 +71,11 @@ const ALLOWED_GUILD_IDS = (process.env.ALLOWED_GUILD_IDS || process.env.GUILD_ID
   .split(',')
   .map((id) => id.trim())
   .filter(Boolean);
-const ENV_CHALLONGE_KEY = (process.env.CHALLONGE_API_KEY || '').trim(); // legacy key (deprecated, kept as fallback)
 const ENV_CHALLONGE_CLIENT_ID = (process.env.CHALLONGE_CLIENT_ID || '').trim();
 const ENV_CHALLONGE_CLIENT_SECRET = (process.env.CHALLONGE_CLIENT_SECRET || '').trim();
 const CHALLONGE_DEFAULT_REDIRECT = process.env.CHALLONGE_REDIRECT_URI || 'https://auth.advancedrestclient.com/oauth-popup.html';
 const CHALLONGE_API_VERSION = process.env.CHALLONGE_API_VERSION || 'v2.1';
 const CHALLONGE_API_BASE = `https://api.challonge.com/${CHALLONGE_API_VERSION}`;
-const CHALLONGE_V1_BASE = 'https://api.challonge.com/v1';
 
 function resolveOwnerRoleId(guildId) {
   return getState(guildId, 'ownerRoleId') || OWNER_ROLE || null;
@@ -105,13 +103,11 @@ function getAdminFlags(interaction, guildId) {
 function getChallongeCredentials(guildId) {
   const clientId = (getState(guildId, 'challongeClientId') || ENV_CHALLONGE_CLIENT_ID || '').trim();
   const clientSecret = (getState(guildId, 'challongeClientSecret') || ENV_CHALLONGE_CLIENT_SECRET || '').trim();
-  const legacyKey = (getState(guildId, 'challongeApiKey') || ENV_CHALLONGE_KEY || '').trim(); // fallback
   const refreshToken = (getState(guildId, 'challongeRefreshToken') || '').trim();
   const expiresAt = getState(guildId, 'challongeAccessTokenExpiresAt') || null;
   return {
     clientId: clientId || null,
     clientSecret: clientSecret || null,
-    legacyKey: legacyKey || null,
     refreshToken: refreshToken || null,
     expiresAt
   };
@@ -134,12 +130,10 @@ function storeChallongeTokens(guildId, accessToken, refreshToken, expiresInSecon
 }
 
 async function fetchChallongeToken(guildId, opts = {}) {
-  const { clientId, clientSecret, legacyKey } = getChallongeCredentials(guildId);
+  const { clientId, clientSecret } = getChallongeCredentials(guildId);
   const { grantType = 'client_credentials', refreshToken, code } = opts;
 
-  // If no client credentials but legacy key exists, bail with legacy key to keep behavior for old accounts.
   if (!clientId || !clientSecret) {
-    if (legacyKey) return { token: null, legacyKey };
     throw new Error('Challonge client credentials not set.');
   }
 
@@ -195,7 +189,7 @@ async function fetchChallongeToken(guildId, opts = {}) {
       const expiresIn = data.expires_in || 3600;
       const newRefresh = data.refresh_token || refreshToken || null;
       storeChallongeTokens(guildId, accessToken, newRefresh, expiresIn);
-      return { token: accessToken, legacyKey: null };
+      return { token: accessToken };
     } catch (err) {
       lastErr = `Token endpoint ${tokenUrl} failed: ${err.message}`;
     }
@@ -206,12 +200,8 @@ async function fetchChallongeToken(guildId, opts = {}) {
 
 async function getChallongeAuth(guildId) {
   const creds = getChallongeCredentials(guildId);
-  // Prefer OAuth; legacy only if no client credentials exist
-  if ((!creds.clientId || !creds.clientSecret) && creds.legacyKey) {
-    return { token: null, legacyKey: creds.legacyKey };
-  }
   const cached = getChallongeCachedToken(guildId);
-  if (cached) return { token: cached, legacyKey: null };
+  if (cached) return { token: cached };
   if (creds.refreshToken) {
     try {
       return await fetchChallongeToken(guildId, { grantType: 'refresh_token', refreshToken: creds.refreshToken });
@@ -241,17 +231,6 @@ function buildJsonApiHeaders(auth) {
     'Content-Type': 'application/vnd.api+json',
     Accept: 'application/vnd.api+json'
   };
-  if (auth?.token) {
-    headers.Authorization = `Bearer ${auth.token}`;
-  }
-  return headers;
-}
-
-function buildLegacyHeaders(auth, includeJsonContentType = false) {
-  const headers = { Accept: 'application/json' };
-  if (includeJsonContentType) {
-    headers['Content-Type'] = 'application/json';
-  }
   if (auth?.token) {
     headers.Authorization = `Bearer ${auth.token}`;
   }
@@ -321,25 +300,21 @@ function buildSignupRows(status, guildId) {
 
 // --- Challonge Integration ---
 async function pushToChallonge(bracket, auth) {
-  const useV2 = !!auth?.token;
-  const base = useV2 ? CHALLONGE_API_BASE : CHALLONGE_V1_BASE;
-  const headers = useV2 ? buildJsonApiHeaders(auth) : buildLegacyHeaders(auth, true);
-
-  let url = useV2
-    ? `${base}/tournaments`
-    : `${base}/tournaments.json`;
-  if (!auth?.token && auth?.legacyKey) {
-    url += `?api_key=${auth.legacyKey}`;
+  if (!auth?.token) {
+    throw new Error('Challonge access token is required for v2.1 API.');
   }
 
-  const payload = useV2
-    ? {
-        data: {
-          type: 'Tournaments',
-          attributes: { name: bracket.name, tournament_type: 'single_elimination' }
-        }
-      }
-    : { tournament: { name: bracket.name, tournament_type: 'single_elimination' } };
+  const base = CHALLONGE_API_BASE;
+  const headers = buildJsonApiHeaders(auth);
+
+  const url = `${base}/tournaments`;
+
+  const payload = {
+    data: {
+      type: 'Tournaments',
+      attributes: { name: bracket.name, tournament_type: 'single_elimination' }
+    }
+  };
 
   const res = await fetch(url, {
     method: 'POST',
@@ -351,16 +326,9 @@ async function pushToChallonge(bracket, auth) {
   const tourn = normalizeTournamentResponse(data);
 
   for (const player of bracket.players) {
-    let pUrl = useV2
-      ? `${base}/tournaments/${tourn.id}/participants`
-      : `${base}/tournaments/${tourn.id}/participants.json`;
-    const pHeaders = useV2 ? buildJsonApiHeaders(auth) : buildLegacyHeaders(auth, true);
-    if (!auth?.token && auth?.legacyKey) {
-      pUrl += `?api_key=${auth.legacyKey}`;
-    }
-    const pPayload = useV2
-      ? { data: { type: 'Participants', attributes: { name: player } } }
-      : { participant: { name: player } };
+    const pUrl = `${base}/tournaments/${tourn.id}/participants`;
+    const pHeaders = buildJsonApiHeaders(auth);
+    const pPayload = { data: { type: 'Participants', attributes: { name: player } } };
     const pr = await fetch(pUrl, {
       method: 'POST',
       headers: pHeaders,
@@ -372,20 +340,17 @@ async function pushToChallonge(bracket, auth) {
 }
 
 async function startChallongeTournament(tid, auth) {
-  const useV2 = !!auth?.token;
-  const base = useV2 ? CHALLONGE_API_BASE : CHALLONGE_V1_BASE;
-  let url = useV2
-    ? `${base}/tournaments/${tid}/start`
-    : `${base}/tournaments/${tid}/start.json`;
-  const headers = useV2 ? buildJsonApiHeaders(auth) : buildLegacyHeaders(auth);
-  if (!auth?.token && auth?.legacyKey) {
-    url += `?api_key=${auth.legacyKey}`;
+  if (!auth?.token) {
+    throw new Error('Challonge access token is required for v2.1 API.');
   }
+  const base = CHALLONGE_API_BASE;
+  const url = `${base}/tournaments/${tid}/start`;
+  const headers = buildJsonApiHeaders(auth);
 
   const res = await fetch(url, {
     method: 'POST',
     headers,
-    body: useV2 ? JSON.stringify({ data: { type: 'Tournaments', id: tid } }) : undefined
+    body: JSON.stringify({ data: { type: 'Tournaments', id: tid } })
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -394,88 +359,44 @@ async function startChallongeTournament(tid, auth) {
 // --- Get Current Match from Challonge ---
 async function getCurrentMatch(tournamentId, auth) {
   try {
-    const useV2 = !!auth?.token;
-    if (useV2) {
-      const url = `${CHALLONGE_API_BASE}/tournaments/${tournamentId}/matches?include=participants`;
-      const headers = buildJsonApiHeaders(auth);
-      const matchesRes = await fetch(url, { headers });
-      if (!matchesRes.ok) throw new Error(await matchesRes.text());
-      const payload = await matchesRes.json();
-      const participantMap = {};
-      (payload.included || [])
-        .filter((item) => item.type === 'participants')
-        .forEach((p) => {
-          const attrs = p.attributes || {};
-          participantMap[p.id] = attrs.name || attrs.display_name || attrs.username;
-        });
-
-      const matches = (payload.data || []).map((m) => {
-        const attrs = m.attributes || {};
-        const rel = m.relationships || {};
-        return {
-          id: m.id,
-          state: attrs.state,
-          scores_csv: attrs.scores_csv,
-          round: attrs.round,
-          player1_id: rel.player1?.data?.id,
-          player2_id: rel.player2?.data?.id
-        };
+    if (!auth?.token) {
+      throw new Error('Challonge access token is required for v2.1 API.');
+    }
+    const url = `${CHALLONGE_API_BASE}/tournaments/${tournamentId}/matches?include=participants`;
+    const headers = buildJsonApiHeaders(auth);
+    const matchesRes = await fetch(url, { headers });
+    if (!matchesRes.ok) throw new Error(await matchesRes.text());
+    const payload = await matchesRes.json();
+    const participantMap = {};
+    (payload.included || [])
+      .filter((item) => item.type === 'participants')
+      .forEach((p) => {
+        const attrs = p.attributes || {};
+        participantMap[p.id] = attrs.name || attrs.display_name || attrs.username;
       });
 
-      const currentMatch = matches.find((match) =>
-        match.state === 'open' && (!match.scores_csv || String(match.scores_csv).trim() === '')
-      );
-
-      if (!currentMatch) return null;
-
+    const matches = (payload.data || []).map((m) => {
+      const attrs = m.attributes || {};
+      const rel = m.relationships || {};
       return {
-        player1: participantMap[currentMatch.player1_id] || 'TBD',
-        player2: participantMap[currentMatch.player2_id] || 'TBD',
-        round: currentMatch.round,
-        matchId: currentMatch.id
+        id: m.id,
+        state: attrs.state,
+        scores_csv: attrs.scores_csv,
+        round: attrs.round,
+        player1_id: rel.player1?.data?.id,
+        player2_id: rel.player2?.data?.id
       };
-    }
-
-    let matchesUrl = `${CHALLONGE_V1_BASE}/tournaments/${tournamentId}/matches.json`;
-    let participantsUrl = `${CHALLONGE_V1_BASE}/tournaments/${tournamentId}/participants.json`;
-    const headers = { Accept: 'application/json' };
-    if (auth?.legacyKey) {
-      matchesUrl += `?api_key=${auth.legacyKey}`;
-      participantsUrl += `?api_key=${auth.legacyKey}`;
-    }
-
-    const matchesRes = await fetch(matchesUrl, { headers });
-    if (!matchesRes.ok) throw new Error(await matchesRes.text());
-    const matchesData = await matchesRes.json();
-
-    // Get participants to map IDs to names
-    const participantsRes = await fetch(participantsUrl, { headers });
-    if (!participantsRes.ok) throw new Error(await participantsRes.text());
-    const participantsData = await participantsRes.json();
-
-    const participantMap = {};
-    const participants = participantsData.participants || participantsData;
-    participants.forEach(p => {
-      const participant = p.participant || p;
-      participantMap[participant.id] = participant.name;
     });
 
-    const matches = (matchesData.matches || matchesData).map(m => m.match || m);
-    const currentMatch = matches.find(match =>
-      match.state === 'open' &&
-      (!match.scores_csv || match.scores_csv.trim() === '')
+    const currentMatch = matches.find((match) =>
+      match.state === 'open' && (!match.scores_csv || String(match.scores_csv).trim() === '')
     );
 
-    if (!currentMatch) {
-      return null; // No current match
-    }
-
-    const player1 = participantMap[currentMatch.player1_id] || 'TBD';
-    const player2 = participantMap[currentMatch.player2_id] || 'TBD';
+    if (!currentMatch) return null;
 
     return {
-      player1,
-      player2,
+      player1: participantMap[currentMatch.player1_id] || 'TBD',
+      player2: participantMap[currentMatch.player2_id] || 'TBD',
       round: currentMatch.round,
       matchId: currentMatch.id
     };
@@ -596,15 +517,12 @@ async function endExistingBracket(interaction, guildId) {
 
   try {
     // 1) Look up current tournament state
-    const isV2 = !!auth?.token;
-    const base = isV2 ? CHALLONGE_API_BASE : CHALLONGE_V1_BASE;
-    let infoUrl = isV2
-      ? `${base}/tournaments/${existingId}`
-      : `${base}/tournaments/${existingId}.json`;
-    const headers = isV2 ? buildJsonApiHeaders(auth) : buildLegacyHeaders(auth);
-    if (!auth?.token && auth?.legacyKey) {
-      infoUrl += `?api_key=${auth.legacyKey}`;
+    if (!auth?.token) {
+      throw new Error('Challonge access token is required for v2.1 API.');
     }
+    const base = CHALLONGE_API_BASE;
+    const infoUrl = `${base}/tournaments/${existingId}`;
+    const headers = buildJsonApiHeaders(auth);
 
     const infoRes = await fetch(infoUrl, { headers });
     if (!infoRes.ok) throw new Error(await infoRes.text());
@@ -622,13 +540,8 @@ async function endExistingBracket(interaction, guildId) {
     }
 
     // 3) Try to finalize if not yet complete
-    let finUrl = isV2
-      ? `${base}/tournaments/${existingId}/finalize`
-      : `${base}/tournaments/${existingId}/finalize.json`;
-    const finHeaders = isV2 ? buildJsonApiHeaders(auth) : buildLegacyHeaders(auth);
-    if (!auth?.token && auth?.legacyKey) {
-      finUrl += `?api_key=${auth.legacyKey}`;
-    }
+    const finUrl = `${base}/tournaments/${existingId}/finalize`;
+    const finHeaders = buildJsonApiHeaders(auth);
 
     const finRes = await fetch(finUrl, {
       method: 'POST',
@@ -1028,17 +941,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setLabel('Refresh Token (optional)')
           .setStyle(TextInputStyle.Short)
           .setRequired(false);
-        const legacyInput = new TextInputBuilder()
-          .setCustomId('legacyApiKey')
-          .setLabel('Legacy API Key (fallback)')
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false);
         modal.addComponents(
           new ActionRowBuilder().addComponents(idInput),
           new ActionRowBuilder().addComponents(secretInput),
           new ActionRowBuilder().addComponents(codeInput),
-          new ActionRowBuilder().addComponents(refreshInput),
-          new ActionRowBuilder().addComponents(legacyInput)
+          new ActionRowBuilder().addComponents(refreshInput)
         );
         try {
           return await interaction.showModal(modal);
@@ -1053,40 +960,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!adminFlags.isAdmin) {
           return interaction.reply({ content: '🚫 Not allowed.', flags: MessageFlags.Ephemeral });
         }
-        const { clientId, clientSecret, legacyKey, refreshToken } = getChallongeCredentials(guildId);
-        const key = legacyKey;
-        if (!clientId && !clientSecret && !key && !refreshToken) {
-          return interaction.reply({ content: '❌ No Challonge credentials set for this guild.', flags: MessageFlags.Ephemeral });
+        const { clientId, clientSecret, refreshToken } = getChallongeCredentials(guildId);
+        if (!clientId || !clientSecret) {
+          return interaction.reply({ content: '❌ Challonge client credentials are not set for this guild.', flags: MessageFlags.Ephemeral });
         }
 
-        const masked = key ? (key.length <= 4 ? key : `${'*'.repeat(Math.max(0, key.length - 4))}${key.slice(-4)}`) : '(none)';
         let status = '⚠️ Could not verify credentials.';
         try {
-          if (clientId && clientSecret) {
-            try {
-              await getChallongeAuth(guildId); // will refresh or fetch as needed
-              const exp = getState(guildId, 'challongeAccessTokenExpiresAt');
-              const expMsg = exp ? ` (expires ${(new Date(exp)).toLocaleString()})` : '';
-              status = `✅ Client credentials are valid; token available${expMsg}.`;
-            } catch (tokenErr) {
-              status = `❌ Challonge rejected client credentials. Response: ${String(tokenErr.message).slice(0, 300)}`;
-            }
-          } else if (key) {
-            const res = await fetch(`https://api.challonge.com/v1/tournaments.json?api_key=${encodeURIComponent(key)}&per_page=1`, { method: 'GET' });
-            if (res.ok) {
-              status = '✅ Legacy key responded.';
-            } else {
-              const txt = (await res.text()).trim().slice(0, 300);
-              status = `❌ Challonge rejected the legacy key. Response: ${txt || res.status}`;
-            }
-          }
+          await getChallongeAuth(guildId); // will refresh or fetch as needed
+          const exp = getState(guildId, 'challongeAccessTokenExpiresAt');
+          const expMsg = exp ? ` (expires ${(new Date(exp)).toLocaleString()})` : '';
+          status = `✅ Client credentials are valid; token available${expMsg}.`;
         } catch (err) {
-          console.error('Challonge key check error:', err);
-          status = '⚠️ Error reaching Challonge (see logs).';
+          status = `❌ Challonge rejected client credentials. Response: ${String(err.message).slice(0, 300)}`;
         }
 
         return interaction.reply({
-          content: `Challonge credentials status:\nClient ID: ${clientId ? '(set)' : '(not set)'}\nRefresh token: ${refreshToken ? '(set)' : '(not set)'}\nLegacy key: ${masked}\n${status}`,
+          content: `Challonge credentials status:\nClient ID: ${clientId ? '(set)' : '(not set)'}\nRefresh token: ${refreshToken ? '(set)' : '(not set)'}\n${status}`,
           flags: MessageFlags.Ephemeral
         });
       }
@@ -1549,15 +1439,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const clientSecret = interaction.fields.getTextInputValue('challongeClientSecret')?.trim();
         const authCode = interaction.fields.getTextInputValue('authCode')?.trim();
         const refreshToken = interaction.fields.getTextInputValue('refreshToken')?.trim();
-        const legacyKey = interaction.fields.getTextInputValue('legacyApiKey')?.trim();
-
-        if (!clientId && !clientSecret && !legacyKey && !refreshToken && !authCode) {
-          return timedReply(interaction, { content: '🚫 Provide Client ID/Secret plus a code or refresh token, or a legacy API key (fallback).', flags: MessageFlags.Ephemeral }, 10000);
+        if (!clientId && !clientSecret && !refreshToken && !authCode) {
+          return timedReply(interaction, { content: '🚫 Provide Client ID/Secret plus a code or refresh token.', flags: MessageFlags.Ephemeral }, 10000);
         }
 
         if (clientId) setState(guildId, 'challongeClientId', clientId);
         if (clientSecret) setState(guildId, 'challongeClientSecret', clientSecret);
-        if (legacyKey) setState(guildId, 'challongeApiKey', legacyKey);
         if (refreshToken) setState(guildId, 'challongeRefreshToken', refreshToken);
 
         // Clear cached token so we fetch a fresh one with new creds when needed
