@@ -71,7 +71,7 @@ const ALLOWED_GUILD_IDS = (process.env.ALLOWED_GUILD_IDS || process.env.GUILD_ID
   .split(',')
   .map((id) => id.trim())
   .filter(Boolean);
-const ENV_CHALLONGE_KEY = process.env.CHALLONGE_API_KEY || '';
+const ENV_CHALLONGE_KEY = (process.env.CHALLONGE_API_KEY || '').trim();
 
 function resolveOwnerRoleId(guildId) {
   return getState(guildId, 'ownerRoleId') || OWNER_ROLE || null;
@@ -97,7 +97,8 @@ function getAdminFlags(interaction, guildId) {
 }
 
 function getChallongeApiKey(guildId) {
-  return getState(guildId, 'challongeApiKey') || ENV_CHALLONGE_KEY;
+  const key = (getState(guildId, 'challongeApiKey') || ENV_CHALLONGE_KEY || '').trim();
+  return key.length ? key : null;
 }
 
 // Cache admin remove menu options per user to avoid large option payloads
@@ -499,6 +500,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ButtonBuilder().setCustomId('createbracket').setLabel('Create Bracket').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('setchannel').setLabel('Set Signup Channel').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('setchallongekey').setLabel('Set Challonge API Key').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('checkchallongekey').setLabel('Check Challonge API Key').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('setroles').setLabel('Set Roles').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('settz').setLabel('Set Default Time Zone').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('removeplayer').setLabel('Remove Player').setStyle(ButtonStyle.Secondary),
@@ -746,6 +748,37 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
       }
 
+      if (interaction.customId === 'checkchallongekey') {
+        const adminFlags = getAdminFlags(interaction, guildId);
+        if (!adminFlags.isAdmin) {
+          return interaction.reply({ content: '🚫 Not allowed.', flags: MessageFlags.Ephemeral });
+        }
+        const key = getChallongeApiKey(guildId);
+        if (!key) {
+          return interaction.reply({ content: '❌ No Challonge API key set for this guild.', flags: MessageFlags.Ephemeral });
+        }
+
+        const masked = key.length <= 4 ? key : `${'*'.repeat(Math.max(0, key.length - 4))}${key.slice(-4)}`;
+        let status = '⚠️ Could not verify key.';
+        try {
+          const res = await fetch(`https://api.challonge.com/v1/tournaments.json?api_key=${encodeURIComponent(key)}&per_page=1`, { method: 'GET' });
+          if (res.ok) {
+            status = '✅ Key is valid (Challonge API responded).';
+          } else {
+            const txt = (await res.text()).trim();
+            status = `❌ Challonge rejected the key. Response: ${txt || res.status}`;
+          }
+        } catch (err) {
+          console.error('Challonge key check error:', err);
+          status = '⚠️ Error reaching Challonge (see logs).';
+        }
+
+        return interaction.reply({
+          content: `Challonge API key status:\nKey: ${masked}\n${status}`,
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
       // Set Signup Channel (admin)
       if (interaction.customId === 'setchannel') {
         const adminFlags = getAdminFlags(interaction, guildId);
@@ -939,6 +972,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const adminFlags = getAdminFlags(interaction, guildId);
         if (!(adminFlags.hasOwnerRole || adminFlags.hasAdminPerm)) return timedReply(interaction, { content: '❌ Only Owners can create brackets.' }, 30000);
 
+        const challongeKey = getChallongeApiKey(guildId);
+        if (!challongeKey) {
+          return timedReply(interaction, { content: '❌ Challonge API key is not set. Click "Set Challonge API Key" first.', flags: MessageFlags.Ephemeral }, 30000);
+        }
+
         if (getTournamentStatus(guildId) !== 'scheduled') {
           return timedReply(interaction, { content: '❌ No scheduled tournament to create a bracket for.' }, 30000);
         }
@@ -973,7 +1011,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         try {
-          const tourn = await pushToChallonge(bracket);
+          const tourn = await pushToChallonge(bracket, challongeKey);
           setState(guildId, 'challongeId', tourn.id);
           setState(guildId, 'challongeUrl', tourn.full_challonge_url);
 
@@ -997,15 +1035,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
       // Start Bracket
       if (interaction.customId === 'start') {
         const adminFlags = getAdminFlags(interaction, guildId);
-        if (!(adminFlags.hasOwnerRole || adminFlags.hasAdminPerm)) return interaction.reply({ content: '?? Only Owners can start the bracket.', flags: MessageFlags.Ephemeral });
+        if (!(adminFlags.hasOwnerRole || adminFlags.hasAdminPerm)) return interaction.reply({ content: '🚫 Only Owners can start the bracket.', flags: MessageFlags.Ephemeral });
 
         const tid = getState(guildId, 'challongeId');
-        if (!tid) return interaction.reply({ content: '?? No Challonge tournament created yet.', flags: MessageFlags.Ephemeral });
+        if (!tid) return interaction.reply({ content: '🚫 No Challonge tournament created yet.', flags: MessageFlags.Ephemeral });
+        const challongeKey = getChallongeApiKey(guildId);
+        if (!challongeKey) return interaction.reply({ content: '❌ Challonge API key is not set. Click "Set Challonge API Key" first.', flags: MessageFlags.Ephemeral });
 
         try {
 
 
-          await startChallongeTournament(tid);
+          await startChallongeTournament(tid, challongeKey);
           clearPlayers(guildId);
           setTournamentStatus(guildId, 'in-progress');
           await updateSignupMessage(client, guildId);
