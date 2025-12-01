@@ -71,6 +71,7 @@ const ALLOWED_GUILD_IDS = (process.env.ALLOWED_GUILD_IDS || process.env.GUILD_ID
   .split(',')
   .map((id) => id.trim())
   .filter(Boolean);
+const ENV_CHALLONGE_KEY = process.env.CHALLONGE_API_KEY || '';
 
 function resolveOwnerRoleId(guildId) {
   return getState(guildId, 'ownerRoleId') || OWNER_ROLE || null;
@@ -93,6 +94,10 @@ function getAdminFlags(interaction, guildId) {
     hasAdminPerm,
     isAdmin: !!(hasOwnerRole || hasStaffRole || hasAdminPerm)
   };
+}
+
+function getChallongeApiKey(guildId) {
+  return getState(guildId, 'challongeApiKey') || ENV_CHALLONGE_KEY;
 }
 
 // Cache admin remove menu options per user to avoid large option payloads
@@ -157,8 +162,8 @@ function buildSignupRows(status, guildId) {
 }
 
 // --- Challonge Integration ---
-async function pushToChallonge(bracket) {
-  const res = await fetch(`https://api.challonge.com/v1/tournaments.json?api_key=${process.env.CHALLONGE_API_KEY}`, {
+async function pushToChallonge(bracket, apiKey) {
+  const res = await fetch(`https://api.challonge.com/v1/tournaments.json?api_key=${apiKey}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -170,7 +175,7 @@ async function pushToChallonge(bracket) {
   const tourn = data.tournament;
 
   for (const player of bracket.players) {
-    const pr = await fetch(`https://api.challonge.com/v1/tournaments/${tourn.id}/participants.json?api_key=${process.env.CHALLONGE_API_KEY}`, {
+    const pr = await fetch(`https://api.challonge.com/v1/tournaments/${tourn.id}/participants.json?api_key=${apiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ participant: { name: player } })
@@ -180,8 +185,8 @@ async function pushToChallonge(bracket) {
   return tourn;
 }
 
-async function startChallongeTournament(tid) {
-  const res = await fetch(`https://api.challonge.com/v1/tournaments/${tid}/start.json?api_key=${process.env.CHALLONGE_API_KEY}`, {
+async function startChallongeTournament(tid, apiKey) {
+  const res = await fetch(`https://api.challonge.com/v1/tournaments/${tid}/start.json?api_key=${apiKey}`, {
     method: 'POST'
   });
   if (!res.ok) throw new Error(await res.text());
@@ -189,15 +194,15 @@ async function startChallongeTournament(tid) {
 }
 
 // --- Get Current Match from Challonge ---
-async function getCurrentMatch(tournamentId) {
+async function getCurrentMatch(tournamentId, apiKey) {
   try {
     // Get matches
-    const matchesRes = await fetch(`https://api.challonge.com/v1/tournaments/${tournamentId}/matches.json?api_key=${process.env.CHALLONGE_API_KEY}`);
+    const matchesRes = await fetch(`https://api.challonge.com/v1/tournaments/${tournamentId}/matches.json?api_key=${apiKey}`);
     if (!matchesRes.ok) throw new Error(await matchesRes.text());
     const matchesData = await matchesRes.json();
 
     // Get participants to map IDs to names
-    const participantsRes = await fetch(`https://api.challonge.com/v1/tournaments/${tournamentId}/participants.json?api_key=${process.env.CHALLONGE_API_KEY}`);
+    const participantsRes = await fetch(`https://api.challonge.com/v1/tournaments/${tournamentId}/participants.json?api_key=${apiKey}`);
     if (!participantsRes.ok) throw new Error(await participantsRes.text());
     const participantsData = await participantsRes.json();
 
@@ -240,6 +245,7 @@ async function postSignupMessage(channel, guildId) {
   const tname = getState(guildId, 'tournamentName') || 'Death Roll Tournament';
   const ttime = getState(guildId, 'tournamentTime') || 'TBD';
   const status = getTournamentStatus(guildId);
+  const challongeApiKey = getChallongeApiKey(guildId);
 
   let content;
   if (status === 'none') {
@@ -251,8 +257,8 @@ async function postSignupMessage(channel, guildId) {
     if (challongeUrl) {
       // Get current match info for live tournaments
       const challongeId = getState(guildId, 'challongeId');
-      if (challongeId) {
-        const currentMatch = await getCurrentMatch(challongeId);
+      if (challongeId && challongeApiKey) {
+        const currentMatch = await getCurrentMatch(challongeId, challongeApiKey);
         if (currentMatch) {
           content = `⚔️ **${tname}**\n🏆 Tournament is live!\n⚡ **Current Match:** ${currentMatch.player1} vs ${currentMatch.player2} (Round ${currentMatch.round})`;
         } else {
@@ -286,6 +292,7 @@ async function updateSignupMessage(client, guildId) {
   const tname = getState(guildId, 'tournamentName') || 'Death Roll Tournament';
   const ttime = getState(guildId, 'tournamentTime') || 'TBD';
   const status = getTournamentStatus(guildId);
+  const challongeApiKey = getChallongeApiKey(guildId);
 
   let content;
   if (status === 'none') {
@@ -297,8 +304,8 @@ async function updateSignupMessage(client, guildId) {
     if (challongeUrl) {
       // Get current match info for live tournaments
       const challongeId = getState(guildId, 'challongeId');
-      if (challongeId) {
-        const currentMatch = await getCurrentMatch(challongeId);
+      if (challongeId && challongeApiKey) {
+        const currentMatch = await getCurrentMatch(challongeId, challongeApiKey);
         if (currentMatch) {
           content = `⚔️ **${tname}**\n🏆 Tournament is live!\n⚡ **Current Match:** ${currentMatch.player1} vs ${currentMatch.player2} (Round ${currentMatch.round})`;
         } else {
@@ -326,13 +333,14 @@ async function timedReply(interaction, options, duration = 10000) {
 // --- End Existing Bracket ---
 async function endExistingBracket(interaction, guildId) {
   const existingId = getState(guildId, 'challongeId');
+  const apiKey = getChallongeApiKey(guildId);
   if (!existingId) {
     return timedReply(interaction, { content: '❌ No existing bracket to end.' }, 30000);
   }
 
   try {
     // 1) Look up current tournament state
-    const infoRes = await fetch(`https://api.challonge.com/v1/tournaments/${existingId}.json?api_key=${process.env.CHALLONGE_API_KEY}`);
+    const infoRes = await fetch(`https://api.challonge.com/v1/tournaments/${existingId}.json?api_key=${apiKey}`);
     if (!infoRes.ok) throw new Error(await infoRes.text());
     const infoData = await infoRes.json();
     const tourn = infoData?.tournament || infoData; // defensive: some libs wrap under { tournament }
@@ -348,7 +356,7 @@ async function endExistingBracket(interaction, guildId) {
     }
 
     // 3) Try to finalize if not yet complete
-    const finRes = await fetch(`https://api.challonge.com/v1/tournaments/${existingId}/finalize.json?api_key=${process.env.CHALLONGE_API_KEY}`, {
+    const finRes = await fetch(`https://api.challonge.com/v1/tournaments/${existingId}/finalize.json?api_key=${apiKey}`, {
       method: 'POST'
     });
 
@@ -490,6 +498,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ButtonBuilder().setCustomId('newtournament').setLabel('New Tournament').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('createbracket').setLabel('Create Bracket').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('setchannel').setLabel('Set Signup Channel').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('setchallongekey').setLabel('Set Challonge API Key').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('setroles').setLabel('Set Roles').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('settz').setLabel('Set Default Time Zone').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('removeplayer').setLabel('Remove Player').setStyle(ButtonStyle.Secondary),
@@ -714,6 +723,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
           components: [new ActionRowBuilder().addComponents(naMenu), new ActionRowBuilder().addComponents(euMenu)],
           flags: MessageFlags.Ephemeral
         });
+      }
+
+      // Set Challonge API Key (admin)
+      if (interaction.customId === 'setchallongekey') {
+        const adminFlags = getAdminFlags(interaction, guildId);
+        if (!(adminFlags.hasOwnerRole || adminFlags.hasAdminPerm)) {
+          return interaction.reply({ content: '🚫 Only Owners (or server admins) can set the Challonge API key.', flags: MessageFlags.Ephemeral });
+        }
+        const modal = new ModalBuilder().setCustomId('challongeKeyModal').setTitle('Set Challonge API Key');
+        const keyInput = new TextInputBuilder()
+          .setCustomId('challongeKey')
+          .setLabel('Challonge API Key')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true);
+        modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
+        try {
+          return await interaction.showModal(modal);
+        } catch (err) {
+          console.error('Error showing Challonge key modal:', err);
+          return interaction.reply({ content: '🚫 Failed to open Challonge key modal.', flags: MessageFlags.Ephemeral });
+        }
       }
 
       // Set Signup Channel (admin)
@@ -1150,6 +1180,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
         setNickname(guildId, interaction.user.id, nickname);
         await updateSignupMessage(client, guildId); // Refresh the signup message with updated names
         return timedReply(interaction, { content: `✅ Nickname set to: ${nickname}` }, 10000);
+      }
+
+      if (interaction.customId === 'challongeKeyModal') {
+        const adminFlags = getAdminFlags(interaction, guildId);
+        if (!(adminFlags.hasOwnerRole || adminFlags.hasAdminPerm)) {
+          return timedReply(interaction, { content: '🚫 Not allowed.', flags: MessageFlags.Ephemeral }, 10000);
+        }
+        const key = interaction.fields.getTextInputValue('challongeKey').trim();
+        if (!key) {
+          return timedReply(interaction, { content: '🚫 Key cannot be empty.', flags: MessageFlags.Ephemeral }, 10000);
+        }
+        setState(guildId, 'challongeApiKey', key);
+        return timedReply(interaction, { content: '✅ Challonge API key saved for this guild.', flags: MessageFlags.Ephemeral }, 10000);
       }
 
       if (interaction.customId === 'signupFriendsModal') {
