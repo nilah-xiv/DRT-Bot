@@ -282,40 +282,52 @@ function buildSignupRows(status, guildId) {
 
 // --- Challonge Integration ---
 async function pushToChallonge(bracket, auth) {
-  const isV2 = !!auth?.token;
-  const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
-  let url = isV2 ? 'https://api.challonge.com/v2/tournaments' : 'https://api.challonge.com/v1/tournaments.json';
+  const useV2 = !!auth?.token;
+  const headers = useV2
+    ? { 'Content-Type': 'application/vnd.api+json', Accept: 'application/json' }
+    : { 'Content-Type': 'application/json', Accept: 'application/json' };
+
+  let url = useV2
+    ? 'https://api.challonge.com/v2/tournaments'
+    : 'https://api.challonge.com/v1/tournaments.json';
   if (auth?.token) {
     headers.Authorization = `Bearer ${auth.token}`;
   } else if (auth?.legacyKey) {
     url += `?api_key=${auth.legacyKey}`;
   }
 
+  const payload = useV2
+    ? { data: { type: 'tournaments', attributes: { name: bracket.name, tournament_type: 'single_elimination' } } }
+    : { tournament: { name: bracket.name, tournament_type: 'single_elimination' } };
+
   const res = await fetch(url, {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      tournament: { name: bracket.name, tournament_type: 'single_elimination' }
-    })
+    body: JSON.stringify(payload)
   });
   if (!res.ok) throw new Error(await res.text());
   const data = await res.json();
   const tourn = data.tournament || data;
 
   for (const player of bracket.players) {
-    let pUrl = isV2
+    let pUrl = useV2
       ? `https://api.challonge.com/v2/tournaments/${tourn.id}/participants`
       : `https://api.challonge.com/v1/tournaments/${tourn.id}/participants.json`;
-    const pHeaders = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    const pHeaders = useV2
+      ? { 'Content-Type': 'application/vnd.api+json', Accept: 'application/json' }
+      : { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (auth?.token) {
       pHeaders.Authorization = `Bearer ${auth.token}`;
     } else if (auth?.legacyKey) {
       pUrl += `?api_key=${auth.legacyKey}`;
     }
+    const pPayload = useV2
+      ? { data: { type: 'participants', attributes: { name: player } } }
+      : { participant: { name: player } };
     const pr = await fetch(pUrl, {
       method: 'POST',
       headers: pHeaders,
-      body: JSON.stringify({ participant: { name: player } })
+      body: JSON.stringify(pPayload)
     });
     if (!pr.ok) throw new Error(await pr.text());
   }
@@ -323,11 +335,13 @@ async function pushToChallonge(bracket, auth) {
 }
 
 async function startChallongeTournament(tid, auth) {
-  const isV2 = !!auth?.token;
-  let url = isV2
+  const useV2 = !!auth?.token;
+  let url = useV2
     ? `https://api.challonge.com/v2/tournaments/${tid}/start`
     : `https://api.challonge.com/v1/tournaments/${tid}/start.json`;
-  const headers = { Accept: 'application/json' };
+  const headers = useV2
+    ? { 'Content-Type': 'application/vnd.api+json', Accept: 'application/json' }
+    : { Accept: 'application/json' };
   if (auth?.token) {
     headers.Authorization = `Bearer ${auth.token}`;
   } else if (auth?.legacyKey) {
@@ -344,14 +358,9 @@ async function startChallongeTournament(tid, auth) {
 
 // --- Get Current Match from Challonge ---
 async function getCurrentMatch(tournamentId, auth) {
-  const isV2 = !!auth?.token;
   try {
-    let matchesUrl = isV2
-      ? `https://api.challonge.com/v2/tournaments/${tournamentId}/matches`
-      : `https://api.challonge.com/v1/tournaments/${tournamentId}/matches.json`;
-    let participantsUrl = isV2
-      ? `https://api.challonge.com/v2/tournaments/${tournamentId}/participants`
-      : `https://api.challonge.com/v1/tournaments/${tournamentId}/participants.json`;
+    let matchesUrl = `https://api.challonge.com/v1/tournaments/${tournamentId}/matches.json`;
+    let participantsUrl = `https://api.challonge.com/v1/tournaments/${tournamentId}/participants.json`;
     const headers = { Accept: 'application/json' };
     if (auth?.token) {
       headers.Authorization = `Bearer ${auth.token}`;
@@ -512,8 +521,11 @@ async function endExistingBracket(interaction, guildId) {
 
   try {
     // 1) Look up current tournament state
-    let infoUrl = `https://api.challonge.com/v1/tournaments/${existingId}.json`;
-    const headers = {};
+    const isV2 = !!auth?.token;
+    let infoUrl = isV2
+      ? `https://api.challonge.com/v2/tournaments/${existingId}`
+      : `https://api.challonge.com/v1/tournaments/${existingId}.json`;
+    const headers = { Accept: 'application/json' };
     if (auth?.token) {
       headers.Authorization = `Bearer ${auth.token}`;
     } else if (auth?.legacyKey) {
@@ -536,8 +548,10 @@ async function endExistingBracket(interaction, guildId) {
     }
 
     // 3) Try to finalize if not yet complete
-    let finUrl = `https://api.challonge.com/v1/tournaments/${existingId}/finalize.json`;
-    const finHeaders = {};
+    let finUrl = isV2
+      ? `https://api.challonge.com/v2/tournaments/${existingId}/finalize`
+      : `https://api.challonge.com/v1/tournaments/${existingId}/finalize.json`;
+    const finHeaders = { Accept: 'application/json' };
     if (auth?.token) {
       finHeaders.Authorization = `Bearer ${auth.token}`;
     } else if (auth?.legacyKey) {
