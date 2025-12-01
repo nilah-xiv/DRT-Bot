@@ -75,6 +75,9 @@ const ENV_CHALLONGE_KEY = (process.env.CHALLONGE_API_KEY || '').trim(); // legac
 const ENV_CHALLONGE_CLIENT_ID = (process.env.CHALLONGE_CLIENT_ID || '').trim();
 const ENV_CHALLONGE_CLIENT_SECRET = (process.env.CHALLONGE_CLIENT_SECRET || '').trim();
 const CHALLONGE_DEFAULT_REDIRECT = process.env.CHALLONGE_REDIRECT_URI || 'https://auth.advancedrestclient.com/oauth-popup.html';
+const CHALLONGE_API_VERSION = process.env.CHALLONGE_API_VERSION || 'v2.1';
+const CHALLONGE_API_BASE = `https://api.challonge.com/${CHALLONGE_API_VERSION}`;
+const CHALLONGE_V1_BASE = 'https://api.challonge.com/v1';
 
 function resolveOwnerRoleId(guildId) {
   return getState(guildId, 'ownerRoleId') || OWNER_ROLE || null;
@@ -219,6 +222,42 @@ async function getChallongeAuth(guildId) {
   return fetchChallongeToken(guildId, { grantType: 'client_credentials' });
 }
 
+function normalizeTournamentResponse(raw) {
+  if (!raw) return {};
+  if (raw.tournament) return raw.tournament;
+  if (raw.data) {
+    const attrs = raw.data.attributes || {};
+    return {
+      id: raw.data.id || attrs.id,
+      full_challonge_url: attrs.full_challonge_url || attrs.fullChallongeUrl || attrs.url,
+      ...attrs
+    };
+  }
+  return raw;
+}
+
+function buildJsonApiHeaders(auth) {
+  const headers = {
+    'Content-Type': 'application/vnd.api+json',
+    Accept: 'application/vnd.api+json'
+  };
+  if (auth?.token) {
+    headers.Authorization = `Bearer ${auth.token}`;
+  }
+  return headers;
+}
+
+function buildLegacyHeaders(auth, includeJsonContentType = false) {
+  const headers = { Accept: 'application/json' };
+  if (includeJsonContentType) {
+    headers['Content-Type'] = 'application/json';
+  }
+  if (auth?.token) {
+    headers.Authorization = `Bearer ${auth.token}`;
+  }
+  return headers;
+}
+
 // Cache admin remove menu options per user to avoid large option payloads
 const adminRemovalCache = new Map();
 
@@ -283,16 +322,13 @@ function buildSignupRows(status, guildId) {
 // --- Challonge Integration ---
 async function pushToChallonge(bracket, auth) {
   const useV2 = !!auth?.token;
-  const headers = useV2
-    ? { 'Content-Type': 'application/vnd.api+json', Accept: 'application/json' }
-    : { 'Content-Type': 'application/json', Accept: 'application/json' };
+  const base = useV2 ? CHALLONGE_API_BASE : CHALLONGE_V1_BASE;
+  const headers = useV2 ? buildJsonApiHeaders(auth) : buildLegacyHeaders(auth, true);
 
   let url = useV2
-    ? 'https://api.challonge.com/v2/tournaments'
-    : 'https://api.challonge.com/v1/tournaments.json';
-  if (auth?.token) {
-    headers.Authorization = `Bearer ${auth.token}`;
-  } else if (auth?.legacyKey) {
+    ? `${base}/tournaments`
+    : `${base}/tournaments.json`;
+  if (!auth?.token && auth?.legacyKey) {
     url += `?api_key=${auth.legacyKey}`;
   }
 
@@ -307,18 +343,14 @@ async function pushToChallonge(bracket, auth) {
   });
   if (!res.ok) throw new Error(await res.text());
   const data = await res.json();
-  const tourn = data.tournament || data;
+  const tourn = normalizeTournamentResponse(data);
 
   for (const player of bracket.players) {
     let pUrl = useV2
-      ? `https://api.challonge.com/v2/tournaments/${tourn.id}/participants`
-      : `https://api.challonge.com/v1/tournaments/${tourn.id}/participants.json`;
-    const pHeaders = useV2
-      ? { 'Content-Type': 'application/vnd.api+json', Accept: 'application/json' }
-      : { 'Content-Type': 'application/json', Accept: 'application/json' };
-    if (auth?.token) {
-      pHeaders.Authorization = `Bearer ${auth.token}`;
-    } else if (auth?.legacyKey) {
+      ? `${base}/tournaments/${tourn.id}/participants`
+      : `${base}/tournaments/${tourn.id}/participants.json`;
+    const pHeaders = useV2 ? buildJsonApiHeaders(auth) : buildLegacyHeaders(auth, true);
+    if (!auth?.token && auth?.legacyKey) {
       pUrl += `?api_key=${auth.legacyKey}`;
     }
     const pPayload = useV2
@@ -336,21 +368,19 @@ async function pushToChallonge(bracket, auth) {
 
 async function startChallongeTournament(tid, auth) {
   const useV2 = !!auth?.token;
+  const base = useV2 ? CHALLONGE_API_BASE : CHALLONGE_V1_BASE;
   let url = useV2
-    ? `https://api.challonge.com/v2/tournaments/${tid}/start`
-    : `https://api.challonge.com/v1/tournaments/${tid}/start.json`;
-  const headers = useV2
-    ? { 'Content-Type': 'application/vnd.api+json', Accept: 'application/json' }
-    : { Accept: 'application/json' };
-  if (auth?.token) {
-    headers.Authorization = `Bearer ${auth.token}`;
-  } else if (auth?.legacyKey) {
+    ? `${base}/tournaments/${tid}/start`
+    : `${base}/tournaments/${tid}/start.json`;
+  const headers = useV2 ? buildJsonApiHeaders(auth) : buildLegacyHeaders(auth);
+  if (!auth?.token && auth?.legacyKey) {
     url += `?api_key=${auth.legacyKey}`;
   }
 
   const res = await fetch(url, {
     method: 'POST',
-    headers
+    headers,
+    body: useV2 ? JSON.stringify({ data: { type: 'tournaments', id: tid } }) : undefined
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -359,12 +389,52 @@ async function startChallongeTournament(tid, auth) {
 // --- Get Current Match from Challonge ---
 async function getCurrentMatch(tournamentId, auth) {
   try {
-    let matchesUrl = `https://api.challonge.com/v1/tournaments/${tournamentId}/matches.json`;
-    let participantsUrl = `https://api.challonge.com/v1/tournaments/${tournamentId}/participants.json`;
+    const useV2 = !!auth?.token;
+    if (useV2) {
+      const url = `${CHALLONGE_API_BASE}/tournaments/${tournamentId}/matches?include=participants`;
+      const headers = buildJsonApiHeaders(auth);
+      const matchesRes = await fetch(url, { headers });
+      if (!matchesRes.ok) throw new Error(await matchesRes.text());
+      const payload = await matchesRes.json();
+      const participantMap = {};
+      (payload.included || [])
+        .filter((item) => item.type === 'participants')
+        .forEach((p) => {
+          const attrs = p.attributes || {};
+          participantMap[p.id] = attrs.name || attrs.display_name || attrs.username;
+        });
+
+      const matches = (payload.data || []).map((m) => {
+        const attrs = m.attributes || {};
+        const rel = m.relationships || {};
+        return {
+          id: m.id,
+          state: attrs.state,
+          scores_csv: attrs.scores_csv,
+          round: attrs.round,
+          player1_id: rel.player1?.data?.id,
+          player2_id: rel.player2?.data?.id
+        };
+      });
+
+      const currentMatch = matches.find((match) =>
+        match.state === 'open' && (!match.scores_csv || String(match.scores_csv).trim() === '')
+      );
+
+      if (!currentMatch) return null;
+
+      return {
+        player1: participantMap[currentMatch.player1_id] || 'TBD',
+        player2: participantMap[currentMatch.player2_id] || 'TBD',
+        round: currentMatch.round,
+        matchId: currentMatch.id
+      };
+    }
+
+    let matchesUrl = `${CHALLONGE_V1_BASE}/tournaments/${tournamentId}/matches.json`;
+    let participantsUrl = `${CHALLONGE_V1_BASE}/tournaments/${tournamentId}/participants.json`;
     const headers = { Accept: 'application/json' };
-    if (auth?.token) {
-      headers.Authorization = `Bearer ${auth.token}`;
-    } else if (auth?.legacyKey) {
+    if (auth?.legacyKey) {
       matchesUrl += `?api_key=${auth.legacyKey}`;
       participantsUrl += `?api_key=${auth.legacyKey}`;
     }
@@ -522,20 +592,19 @@ async function endExistingBracket(interaction, guildId) {
   try {
     // 1) Look up current tournament state
     const isV2 = !!auth?.token;
+    const base = isV2 ? CHALLONGE_API_BASE : CHALLONGE_V1_BASE;
     let infoUrl = isV2
-      ? `https://api.challonge.com/v2/tournaments/${existingId}`
-      : `https://api.challonge.com/v1/tournaments/${existingId}.json`;
-    const headers = { Accept: 'application/json' };
-    if (auth?.token) {
-      headers.Authorization = `Bearer ${auth.token}`;
-    } else if (auth?.legacyKey) {
+      ? `${base}/tournaments/${existingId}`
+      : `${base}/tournaments/${existingId}.json`;
+    const headers = isV2 ? buildJsonApiHeaders(auth) : buildLegacyHeaders(auth);
+    if (!auth?.token && auth?.legacyKey) {
       infoUrl += `?api_key=${auth.legacyKey}`;
     }
 
     const infoRes = await fetch(infoUrl, { headers });
     if (!infoRes.ok) throw new Error(await infoRes.text());
     const infoData = await infoRes.json();
-    const tourn = infoData?.tournament || infoData; // defensive: some libs wrap under { tournament }
+    const tourn = normalizeTournamentResponse(infoData); // defensive: some libs wrap under { tournament }
     const state = tourn?.state;
 
     // 2) If already complete, just clear local state
@@ -549,12 +618,10 @@ async function endExistingBracket(interaction, guildId) {
 
     // 3) Try to finalize if not yet complete
     let finUrl = isV2
-      ? `https://api.challonge.com/v2/tournaments/${existingId}/finalize`
-      : `https://api.challonge.com/v1/tournaments/${existingId}/finalize.json`;
-    const finHeaders = { Accept: 'application/json' };
-    if (auth?.token) {
-      finHeaders.Authorization = `Bearer ${auth.token}`;
-    } else if (auth?.legacyKey) {
+      ? `${base}/tournaments/${existingId}/finalize`
+      : `${base}/tournaments/${existingId}/finalize.json`;
+    const finHeaders = isV2 ? buildJsonApiHeaders(auth) : buildLegacyHeaders(auth);
+    if (!auth?.token && auth?.legacyKey) {
       finUrl += `?api_key=${auth.legacyKey}`;
     }
 
