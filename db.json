@@ -133,7 +133,7 @@
         ]
       },
       "state": {
-        "signupMessageId": "1444892585263894600",
+        "signupMessageId": "1444895913414758554",
         "signupChannelId": "1400305172265173042",
         "challongeId": 17178261,
         "challongeUrl": "https://challonge.com/sv0n4sp1",
@@ -233,12 +233,39 @@
       }
     },
     "1394035178900295770": {
-      "players": {},
+      "players": {
+        "149333533641539585": [
+          "NV2",
+          "ME",
+          "YOU",
+          "THEM",
+          "THEY"
+        ]
+      },
       "state": {
-        "signupMessageId": "1444892587420024932",
+        "signupMessageId": "1444895916015484968",
         "signupChannelId": "1440173166570766336",
         "ownerRoleId": "1394035178900295778",
-        "staffRoleId": "1394035178900295778"
+        "staffRoleId": "1394035178900295778",
+        "challongeId": 17178641,
+        "challongeUrl": "https://challonge.com/q5zid469",
+        "bracket": {
+          "name": "132",
+          "time": "11-30-25 10:30 PM UTC (<t:1764541800:f>)",
+          "players": [
+            "NV2",
+            "ME",
+            "YOU",
+            "THEM",
+            "THEY"
+          ],
+          "createdAt": "2025-12-01T03:41:20.709Z"
+        },
+        "tournamentName": "132",
+        "tournamentDate": "2025-11-30",
+        "tournamentTime": "11-30-25 10:30 PM UTC (<t:1764541800:f>)",
+        "tournamentStatus": "scheduled",
+        "challongeApiKey": "IEBvrUvnc4h6INFkxKAQeve3NszwBRvaCkUe6uXB"
       },
       "nicknames": {
         "149333533641539585": "NV2"
