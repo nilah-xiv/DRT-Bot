@@ -9,15 +9,31 @@ let db = {
   nicknames: {}  // keyed by userId → nickname
 };
 
+function ensureShape() {
+  if (!db || typeof db !== 'object') {
+    db = { players: {}, state: {}, nicknames: {} };
+    return;
+  }
+  if (!db.players || typeof db.players !== 'object') db.players = {};
+  if (!db.state || typeof db.state !== 'object') db.state = {};
+  if (!db.nicknames || typeof db.nicknames !== 'object') db.nicknames = {};
+}
+
 // Load existing data if file exists
 if (fs.existsSync(DB_FILE)) {
   try {
     const raw = fs.readFileSync(DB_FILE, 'utf-8');
     db = JSON.parse(raw);
+    ensureShape();
   } catch (err) {
     console.error('Failed to load db.json, starting fresh:', err);
+    ensureShape();
   }
+} else {
+  ensureShape();
 }
+
+ensureShape();
 
 // Save helper
 function save() {
@@ -48,14 +64,23 @@ function listUserPlayers(userId) {
   return db.players[userId] || [];
 }
 
+function getAllPlayerEntries() {
+  ensureShape();
+  const entries = [];
+  for (const [userId, names] of Object.entries(db.players)) {
+    names.forEach((name) => entries.push({ userId, name }));
+  }
+  return entries;
+}
+
 function clearPlayers() {
   db.players = {};
   save();
 }
 
 function clearTournamentData() {
+  ensureShape();
   db.players = {};
-  if (!db.state) db.state = {};
   db.state.tournamentName = null;
   db.state.tournamentDate = null;
   db.state.tournamentTime = null;
@@ -66,38 +91,45 @@ function clearTournamentData() {
   save();
 }
 function setDefaultTz(tz) {
+  ensureShape();
   db.state.defaultTz = tz;
   save();
 }
 
 function getDefaultTz() {
+  ensureShape();
   return db.state.defaultTz || 'UTC';
 }
 
 
 // === State (misc tournament data) ===
 function setState(key, value) {
+  ensureShape();
   db.state[key] = value;
   save();
 }
 
 function getState(key) {
+  ensureShape();
   return db.state[key];
 }
 
 // Explicit helpers for tournament status
 function setTournamentStatus(status) {
   // status = "none" | "scheduled" | "in-progress"
+  ensureShape();
   db.state.tournamentStatus = status;
   save();
 }
 
 function getTournamentStatus() {
+  ensureShape();
   return db.state.tournamentStatus || "none";
 }
 
 // === Nicknames ===
 function setNickname(userId, nickname) {
+  ensureShape();
   const oldNickname = db.nicknames[userId];
   db.nicknames[userId] = nickname;
   
@@ -115,7 +147,22 @@ function setNickname(userId, nickname) {
 }
 
 function getNickname(userId) {
+  ensureShape();
   return db.nicknames[userId];
+}
+
+function removePlayerForUser(userId, name) {
+  ensureShape();
+  const names = db.players[userId];
+  if (!names) return false;
+  const idx = names.indexOf(name);
+  if (idx === -1) return false;
+  names.splice(idx, 1);
+  if (names.length === 0) {
+    delete db.players[userId];
+  }
+  save();
+  return true;
 }
 
 module.exports = {
@@ -123,6 +170,7 @@ module.exports = {
   removePlayers,
   listPlayers,
   listUserPlayers,
+  getAllPlayerEntries,
   clearPlayers,
   clearTournamentData,
   setState,
@@ -131,6 +179,7 @@ module.exports = {
   getTournamentStatus,
   setNickname,
   getNickname,
+  removePlayerForUser,
   setDefaultTz,
   getDefaultTz
 };

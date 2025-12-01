@@ -48,7 +48,7 @@ const {
   setState, getState,
   addPlayers, removePlayers, listPlayers,
   clearPlayers, clearTournamentData, setNickname, getNickname,
-  listUserPlayers,
+  listUserPlayers, getAllPlayerEntries, removePlayerForUser,
   setTournamentStatus, getTournamentStatus,
   setDefaultTz, getDefaultTz
 } = require('./db');
@@ -62,6 +62,9 @@ const client = new Client({
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const OWNER_ROLE = process.env.OWNER_ROLE_ID;
 const STAFF_ROLE = process.env.STAFF_ROLE_ID;
+
+// Cache admin remove menu options per user to avoid large option payloads
+const adminRemovalCache = new Map();
 
 // --- Build TZ Options ---
 function buildTzOptions(zones) {
@@ -400,17 +403,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!isAdmin) {
         return interaction.reply({ content: '❌ Not allowed.', ephemeral: true });
       }
-      const row1 = new ActionRowBuilder().addComponents(
+      const adminButtons = [
         new ButtonBuilder().setCustomId('start').setLabel('Start Bracket').setStyle(ButtonStyle.Danger),
         new ButtonBuilder().setCustomId('newtournament').setLabel('New Tournament').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('createbracket').setLabel('Create Bracket').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('settz').setLabel('Set Default Time Zone').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('killtournament').setLabel('Kill Tournament').setStyle(ButtonStyle.Danger)
-      );
-      const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('removeplayer').setLabel('Remove Player').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('killtournament').setLabel('Kill Tournament').setStyle(ButtonStyle.Danger),
         new ButtonBuilder().setCustomId('endbracket').setLabel('End Bracket').setStyle(ButtonStyle.Danger)
-      );
-      const components = [row1, row2];
+      ];
+
+      const components = [];
+      for (let i = 0; i < adminButtons.length; i += 5) {
+        const slice = adminButtons.slice(i, i + 5);
+        if (slice.length > 0) {
+          components.push(new ActionRowBuilder().addComponents(...slice));
+        }
+      }
       const challongeUrl = getState('challongeUrl');
       if (challongeUrl) {
         const row2 = new ActionRowBuilder().addComponents(
@@ -425,7 +434,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           flags: MessageFlags.Ephemeral
         });
       } catch (replyErr) {
-        console.log('Could not reply to /drtadmin command (likely timeout)');
+        console.error('Could not reply to /drtadmin command:', replyErr);
       }
     }
 
@@ -562,10 +571,49 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // List Players
       if (interaction.customId === 'list') {
-        const players = listPlayers();
-        if (players.length === 0) return timedReply(interaction, { content: '📝 No signups yet.' }, 30000);
-        const formatted = players.map((p, i) => `${i + 1}. ${p}`).join('\n');
-        return timedReply(interaction, { content: `**Signups (${players.length})**\n${formatted}` }, 30000);
+        const entries = getAllPlayerEntries();
+        console.log('List button entries count:', entries.length);
+        if (entries.length === 0) {
+          return timedReply(interaction, { content: '📝 No signups yet.' }, 30000);
+        }
+
+        const lines = entries.map(({ name }, idx) => `${idx + 1}. ${name}`);
+        const chunks = [];
+        let current = `**Signups (${entries.length})**`;
+
+        for (const line of lines) {
+          if (current.length + line.length + 1 > 1900) {
+            chunks.push(current);
+            current = line;
+          } else {
+            current += `\n${line}`;
+          }
+        }
+
+        if (current.length > 0) {
+          chunks.push(current);
+        }
+
+        if (chunks.length === 0) {
+          return timedReply(interaction, { content: '📝 No signups yet.' }, 30000);
+        }
+
+        try {
+          await interaction.reply({ content: chunks[0], flags: MessageFlags.Ephemeral });
+        } catch (replyErr) {
+          console.error('Failed to reply with signup list:', replyErr);
+          return;
+        }
+
+        await Promise.all(chunks.slice(1).map(async (chunk) => {
+          try {
+            await interaction.followUp({ content: chunk, flags: MessageFlags.Ephemeral });
+          } catch (followErr) {
+            console.error('Failed to send signup list follow-up:', followErr);
+          }
+        }));
+
+        return;
       }
 
 
@@ -583,6 +631,67 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({
           content: '🌍 Please select a default time zone for tournaments:',
           components: [new ActionRowBuilder().addComponents(naMenu), new ActionRowBuilder().addComponents(euMenu)],
+          flags: MessageFlags.Ephemeral
+        });
+      }
+
+      // Admin Remove Player
+      if (interaction.customId === 'removeplayer') {
+        const hasOwnerRole = interaction.member?.roles?.cache?.has(OWNER_ROLE);
+        const hasStaffRole = STAFF_ROLE && interaction.member?.roles?.cache?.has(STAFF_ROLE);
+        if (!hasOwnerRole && !hasStaffRole) {
+          return interaction.reply({ content: '❌ Only Owners or Staff can remove players.', flags: MessageFlags.Ephemeral });
+        }
+
+        const entries = getAllPlayerEntries();
+        if (entries.length === 0) {
+          return interaction.reply({ content: '📝 No players to remove.', flags: MessageFlags.Ephemeral });
+        }
+
+        const chunkSize = 25;
+        for (const key of adminRemovalCache.keys()) {
+          if (key.startsWith(`${interaction.user.id}:`)) {
+            adminRemovalCache.delete(key);
+          }
+        }
+        const components = [];
+        const menuCount = Math.ceil(entries.length / chunkSize);
+        const rowsLimit = Math.min(menuCount, 5);
+
+        for (let chunkIndex = 0, page = 0; chunkIndex < entries.length && page < rowsLimit; chunkIndex += chunkSize, page += 1) {
+          const chunk = entries.slice(chunkIndex, chunkIndex + chunkSize);
+          const cacheKey = `${interaction.user.id}:${page}`;
+          adminRemovalCache.set(cacheKey, chunk);
+
+          const options = chunk.map(({ userId, name }, idx) => {
+            const option = new StringSelectMenuOptionBuilder()
+              .setLabel(String(name).substring(0, 100) || `Player ${chunkIndex + idx + 1}`)
+              .setValue(String(idx));
+            const nickname = getNickname(userId);
+            if (nickname) option.setDescription(nickname.substring(0, 100));
+            return option;
+          });
+
+          const start = chunkIndex + 1;
+          const end = chunkIndex + chunk.length;
+          const menu = new StringSelectMenuBuilder()
+            .setCustomId(`adminRemoveSelect:${page}`)
+            .setPlaceholder(`Select players ${start}-${end}`)
+            .setMinValues(1)
+            .setMaxValues(options.length)
+            .addOptions(options);
+
+          components.push(new ActionRowBuilder().addComponents(menu));
+        }
+
+        let note = `Select players to remove (showing ${Math.min(entries.length, rowsLimit * chunkSize)} of ${entries.length}).`;
+        if (menuCount > rowsLimit) {
+          note += ' Showing first 5 menus due to Discord limits.';
+        }
+
+        return interaction.reply({
+          content: note,
+          components,
           flags: MessageFlags.Ephemeral
         });
       }
@@ -760,6 +869,65 @@ client.on(Events.InteractionCreate, async (interaction) => {
         removePlayers(interaction.user.id, selected);
         await timedReply(interaction, { content: `🗑️ Removed: ${selected.join(', ')}` }, 10000);
         return updateSignupMessage(client);
+      }
+
+      if (interaction.customId.startsWith('adminRemoveSelect')) {
+        const hasOwnerRole = interaction.member?.roles?.cache?.has(OWNER_ROLE);
+        const hasStaffRole = STAFF_ROLE && interaction.member?.roles?.cache?.has(STAFF_ROLE);
+        if (!hasOwnerRole && !hasStaffRole) {
+          return interaction.update({ content: '❌ Not allowed.', components: [] });
+        }
+
+        const [, pageStr = '0'] = interaction.customId.split(':');
+        const cacheKey = `${interaction.user.id}:${pageStr}`;
+        const cachedEntries = adminRemovalCache.get(cacheKey) || [];
+
+        const removed = [];
+        const failed = [];
+
+        for (const value of interaction.values) {
+          try {
+            const idx = Number(value);
+            if (!Number.isInteger(idx) || idx < 0 || idx >= cachedEntries.length) {
+              failed.push('Unknown');
+              continue;
+            }
+            const payload = cachedEntries[idx];
+            const ok = payload && removePlayerForUser(payload.userId, payload.name);
+            if (ok) {
+              removed.push(payload.name);
+            } else {
+              failed.push(payload?.name ?? 'Unknown');
+            }
+          } catch (err) {
+            console.error('Failed to decode admin removal selection:', err);
+            failed.push('Unknown');
+          }
+        }
+
+        adminRemovalCache.delete(cacheKey);
+
+        const seen = new Set();
+        const uniqueRemoved = removed.filter(name => {
+          const key = name.toLowerCase();
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+
+        const parts = [];
+        if (uniqueRemoved.length > 0) parts.push(`✅ Removed: ${uniqueRemoved.join(', ')}`);
+        if (failed.length > 0) {
+          const failedSet = Array.from(new Set(failed));
+          parts.push(`⚠️ Could not remove: ${failedSet.join(', ')}`);
+        }
+        if (removed.length === 0 && failed.length === 0) parts.push('No changes made.');
+
+        const message = parts.join('\n');
+
+        await interaction.update({ content: message, components: [] });
+        await updateSignupMessage(client);
+        return;
       }
 
       if (interaction.customId === 'tzSelectNA' || interaction.customId === 'tzSelectEU') {
